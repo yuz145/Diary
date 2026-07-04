@@ -8,7 +8,7 @@
 
 // 今は R2 を直接読む。将来はここを '/api/notes' 系に置き換える。
 const CONFIG = {
-  indexUrl: "https://<R2_PUBLIC_BASE>/notes/index.json",
+  indexUrl: "https://pub-e5e3bb4f567c42cabe57034c606e7b3b.r2.dev",
   entryBaseUrl: "https://<R2_PUBLIC_BASE>/notes/entries/",
 };
 
