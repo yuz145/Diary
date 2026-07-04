@@ -217,6 +217,66 @@ function renderTagFilter() {
 function renderList() {
   el.list.replaceChildren();
 
+  if (state.items.length === 0) {
+    if (state.query.trim() || state.activeTag) {
+      showListStatus("該当するメモが見つかりません。");
+    } else {
+      showListStatus("メモがまだありません。「+ 新規」から作成できます。");
+    }
+    updateLoadMoreVisibility();
+    return;
+  }
+  hideListStatus();
+
+  for (const item of state.items) {
+    const li = document.createElement("li");
+    li.className = "note-list__item";
+    li.classList.toggle("note-list__item--active", item.id === state.selectedId);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "note-list__button";
+    button.addEventListener("click", () => selectEntry(item.id));
+
+    const title = document.createElement("p");
+    title.className = "note-list__title";
+    title.textContent = item.title || "(無題)";
+
+    const meta = document.createElement("div");
+    meta.className = "note-list__meta";
+    const date = document.createElement("time");
+    date.className = "note-list__date";
+    date.textContent = formatDate(item.date);
+    meta.appendChild(date);
+
+    button.appendChild(title);
+    button.appendChild(meta);
+
+    if (item.summary) {
+      const summary = document.createElement("p");
+      summary.className = "note-list__summary";
+      summary.textContent = item.summary;
+      button.appendChild(summary);
+    }
+
+    if (Array.isArray(item.tags) && item.tags.length > 0) {
+      const tagList = document.createElement("div");
+      tagList.className = "note-list__tags";
+      for (const tag of item.tags) {
+        const tagEl = document.createElement("span");
+        tagEl.className = "note-list__tag";
+        tagEl.textContent = tag;
+        tagList.appendChild(tagEl);
+      }
+      button.appendChild(tagList);
+    }
+
+    li.appendChild(button);
+    el.list.appendChild(li);
+  }
+
+  updateLoadMoreVisibility();
+}
 
 function parseInlineMarkdown(text) {
   const fragment = document.createDocumentFragment();
@@ -343,66 +403,6 @@ function renderMarkdownContent(container, markdownText) {
   }
 
   container.replaceChildren(fragment);
-}
-  if (state.items.length === 0) {
-    if (state.query.trim() || state.activeTag) {
-      showListStatus("該当するメモが見つかりません。");
-    } else {
-      showListStatus("メモがまだありません。「+ 新規」から作成できます。");
-    }
-    updateLoadMoreVisibility();
-    return;
-  }
-  hideListStatus();
-
-  for (const item of state.items) {
-    const li = document.createElement("li");
-    li.className = "note-list__item";
-    li.classList.toggle("note-list__item--active", item.id === state.selectedId);
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "note-list__button";
-    button.addEventListener("click", () => selectEntry(item.id));
-
-    const title = document.createElement("p");
-    title.className = "note-list__title";
-    title.textContent = item.title || "(無題)";
-
-    const meta = document.createElement("div");
-    meta.className = "note-list__meta";
-    const date = document.createElement("time");
-    date.className = "note-list__date";
-    date.textContent = formatDate(item.date);
-    meta.appendChild(date);
-
-    button.appendChild(title);
-    button.appendChild(meta);
-
-    if (item.summary) {
-      const summary = document.createElement("p");
-      summary.className = "note-list__summary";
-      summary.textContent = item.summary;
-      button.appendChild(summary);
-    }
-
-    if (Array.isArray(item.tags) && item.tags.length > 0) {
-      const tagList = document.createElement("div");
-      tagList.className = "note-list__tags";
-      for (const tag of item.tags) {
-        const tagEl = document.createElement("span");
-        tagEl.className = "note-list__tag";
-        tagEl.textContent = tag;
-        tagList.appendChild(tagEl);
-      }
-      button.appendChild(tagList);
-    }
-
-    li.appendChild(button);
-    el.list.appendChild(li);
-  }
-
-  updateLoadMoreVisibility();
 }
 
 function updateLoadMoreVisibility() {
