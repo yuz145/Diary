@@ -8,8 +8,8 @@
 
 // Workers デプロイ後に発行されるURLに置き換える
 const CONFIG = {
-  indexUrl: "https://<R2_PUBLIC_BASE>/notes/index.json",
-  entryBaseUrl: "https://notes-api.<subdomain>.workers.dev/api/notes/",
+  indexUrl: "https://pub-e5e3bb4f567c42cabe57034c606e7b3b.r2.dev",
+  entryBaseUrl: "https://<R2_PUBLIC_BASE>/notes/entries/",
 };
 
 // アプリの状態はここだけで持つ（localStorageは使わない）
