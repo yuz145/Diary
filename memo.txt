@@ -1,1 +1,0 @@
-indexUrl: "https://<R2_PUBLIC_BASE>/notes/index.json",
