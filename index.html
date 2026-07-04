@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>notes</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-theme="light">
+
+  <header class="app-header">
+    <h1 class="app-header__title">notes</h1>
+    <button
+      id="theme-toggle"
+      class="theme-toggle"
+      type="button"
+      aria-label="配色を切り替える"
+      title="配色を切り替える"
+    >
+      <span class="theme-toggle__icon" aria-hidden="true">●</span>
+    </button>
+  </header>
+
+  <div class="toolbar">
+    <input
+      id="search-input"
+      class="toolbar__search"
+      type="search"
+      placeholder="検索(準備中)"
+      aria-label="メモを検索"
+      disabled
+    >
+    <button
+      id="new-note-button"
+      class="toolbar__new-button"
+      type="button"
+      disabled
+      title="作成機能は準備中です"
+    >
+      + 新規
+    </button>
+  </div>
+
+  <main class="app-main">
+    <section class="note-list-pane" aria-label="メモ一覧">
+      <ol id="note-list" class="note-list">
+        <!-- renderList() が <li class="note-list__item"> をここに挿入する -->
+      </ol>
+      <p id="note-list-status" class="pane-status" hidden></p>
+    </section>
+
+    <section class="note-view-pane" aria-label="メモ本文">
+      <article id="note-view" class="note-view">
+        <!-- renderEntry() がここに本文を挿入する -->
+      </article>
+      <p id="note-view-status" class="pane-status" hidden></p>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
