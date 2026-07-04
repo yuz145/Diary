@@ -60,6 +60,10 @@ const el = {
   loadMoreButton: document.getElementById("load-more-button"),
 };
 
+function isCompactScreen() {
+  return window.matchMedia("(max-width: 767px)").matches;
+}
+
 /* ---- data access layer ---- */
 
 async function fetchList({ offset }) {
@@ -507,13 +511,50 @@ function renderForm(existingEntry) {
   const tagsInput = document.createElement("input");
   tagsInput.className = "note-form__input";
   tagsInput.type = "text";
+  tagsInput.setAttribute("list", "tag-suggestions");
   // "タイトル未設定" タグはサーバー側が自動管理するので、編集フォーム上は隠しておく
   // (ユーザーがタイトルを埋めれば保存時に自動で外れる)
   tagsInput.value = isEdit ? tagsToText((existingEntry.tags || []).filter((t) => t !== UNTITLED_TAG)) : "";
   tagsLabel.appendChild(tagsInput);
 
+  const tagsHint = document.createElement("p");
+  tagsHint.className = "note-form__hint";
+  tagsHint.textContent = "過去のタグは候補から選べます。カンマ区切りで複数入力できます。";
+
+  const tagSuggestions = document.createElement("datalist");
+  tagSuggestions.id = "tag-suggestions";
+  [...state.knownTags]
+    .filter((tag) => tag !== UNTITLED_TAG)
+    .sort((a, b) => a.localeCompare(b, "ja"))
+    .forEach((tag) => {
+      const option = document.createElement("option");
+      option.value = tag;
+      tagSuggestions.appendChild(option);
+    });
+
   const feedback = document.createElement("p");
   feedback.className = "form-feedback";
+
+  const previewDetails = document.createElement("details");
+  previewDetails.className = "note-form__preview";
+  previewDetails.open = !isCompactScreen();
+
+  const previewSummary = document.createElement("summary");
+  previewSummary.className = "note-form__preview-summary";
+  previewSummary.textContent = "Markdownプレビュー";
+
+  const previewBody = document.createElement("div");
+  previewBody.className = "note-form__preview-body";
+
+  const updatePreview = () => {
+    renderMarkdownContent(previewBody, contentInput.value);
+  };
+
+  contentInput.addEventListener("input", updatePreview);
+  updatePreview();
+
+  previewDetails.appendChild(previewSummary);
+  previewDetails.appendChild(previewBody);
 
   const buttons = document.createElement("div");
   buttons.className = "note-form__buttons";
@@ -541,6 +582,9 @@ function renderForm(existingEntry) {
   form.appendChild(titleLabel);
   form.appendChild(contentLabel);
   form.appendChild(tagsLabel);
+  form.appendChild(tagsHint);
+  form.appendChild(tagSuggestions);
+  form.appendChild(previewDetails);
   form.appendChild(feedback);
   form.appendChild(buttons);
 
