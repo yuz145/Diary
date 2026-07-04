@@ -2,8 +2,8 @@
 
 /* ==========================================================================
    notes — app.js
-   Phase 2: R2への読み書きは全て Cloudflare Workers 経由。
-   フロントから直接R2へPUTすることはない。
+   D1(本文・メタデータ) + R2(画像のみ) 構成。
+   検索・タグ絞り込み・ページングはすべてWorkers(D1)側で行う。
    アクセス制御は Cloudflare Access が行うため、アプリ側に認証ロジックは持たない。
    ========================================================================== */
 
@@ -30,11 +30,21 @@ function assertConfigIsSet() {
   return null;
 }
 
+const PAGE_SIZE = 20;
+const UNTITLED_TAG = "タイトル未設定";
+
 // アプリの状態はここだけで持つ（localStorageは使わない）
 const state = {
   items: [],
+  total: 0,
+  hasMore: false,
   selectedId: null,
+  query: "",
+  activeTag: null,
+  knownTags: new Set(), // タグチップ表示用。読み込んだ範囲から見えたタグを蓄積するだけの簡易実装
 };
+
+let searchDebounceTimer = null;
 
 /* ---- DOM references ---- */
 
@@ -45,14 +55,23 @@ const el = {
   viewStatus: document.getElementById("note-view-status"),
   themeToggle: document.getElementById("theme-toggle"),
   newNoteButton: document.getElementById("new-note-button"),
+  searchInput: document.getElementById("search-input"),
+  tagFilter: document.getElementById("tag-filter"),
+  loadMoreButton: document.getElementById("load-more-button"),
 };
 
 /* ---- data access layer ---- */
 
-async function fetchIndex() {
-  const response = await fetch(CONFIG.indexUrl);
+async function fetchList({ offset }) {
+  const url = new URL(CONFIG.indexUrl);
+  url.searchParams.set("limit", String(PAGE_SIZE));
+  url.searchParams.set("offset", String(offset));
+  if (state.query) url.searchParams.set("q", state.query);
+  if (state.activeTag) url.searchParams.set("tag", state.activeTag);
+
+  const response = await fetch(url.toString());
   if (!response.ok) {
-    throw new Error(`index の取得に失敗しました (status: ${response.status})`);
+    throw new Error(`一覧の取得に失敗しました (status: ${response.status})`);
   }
   return response.json();
 }
@@ -102,10 +121,6 @@ function formatDate(isoString) {
   return `${y}-${m}-${d} ${hh}:${mm}`;
 }
 
-function sortByDateDesc(items) {
-  return [...items].sort((a, b) => new Date(b.date) - new Date(a.date));
-}
-
 function tagsToText(tags) {
   return Array.isArray(tags) ? tags.join(", ") : "";
 }
@@ -115,6 +130,16 @@ function textToTags(text) {
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+}
+
+function mergeKnownTags(items) {
+  for (const item of items) {
+    if (Array.isArray(item.tags)) {
+      for (const tag of item.tags) {
+        state.knownTags.add(tag);
+      }
+    }
+  }
 }
 
 /* ---- error diagnostics ---- */
@@ -162,18 +187,48 @@ function hideViewStatus() {
   el.viewStatus.hidden = true;
 }
 
+/* ---- rendering: タグフィルタチップ ---- */
+
+function renderTagFilter() {
+  const tags = [...state.knownTags].sort((a, b) => a.localeCompare(b, "ja"));
+
+  if (tags.length === 0) {
+    el.tagFilter.hidden = true;
+    el.tagFilter.replaceChildren();
+    return;
+  }
+
+  el.tagFilter.hidden = false;
+  el.tagFilter.replaceChildren();
+
+  for (const tag of tags) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "tag-filter__chip";
+    chip.classList.toggle("tag-filter__chip--active", tag === state.activeTag);
+    chip.textContent = tag;
+    chip.addEventListener("click", () => handleTagChipClick(tag));
+    el.tagFilter.appendChild(chip);
+  }
+}
+
 /* ---- rendering: 一覧 ---- */
 
-function renderList(items) {
+function renderList() {
   el.list.replaceChildren();
 
-  if (items.length === 0) {
-    showListStatus("メモがまだありません。「+ 新規」から作成できます。");
+  if (state.items.length === 0) {
+    if (state.query.trim() || state.activeTag) {
+      showListStatus("該当するメモが見つかりません。");
+    } else {
+      showListStatus("メモがまだありません。「+ 新規」から作成できます。");
+    }
+    updateLoadMoreVisibility();
     return;
   }
   hideListStatus();
 
-  for (const item of items) {
+  for (const item of state.items) {
     const li = document.createElement("li");
     li.className = "note-list__item";
     li.classList.toggle("note-list__item--active", item.id === state.selectedId);
@@ -219,6 +274,13 @@ function renderList(items) {
     li.appendChild(button);
     el.list.appendChild(li);
   }
+
+  updateLoadMoreVisibility();
+}
+
+function updateLoadMoreVisibility() {
+  el.loadMoreButton.hidden = !state.hasMore;
+  el.loadMoreButton.disabled = false;
 }
 
 /* ---- rendering: 本文(閲覧) ---- */
@@ -296,11 +358,10 @@ function renderForm(existingEntry) {
 
   const titleLabel = document.createElement("label");
   titleLabel.className = "note-form__label";
-  titleLabel.textContent = "タイトル";
+  titleLabel.textContent = "タイトル(空欄可)";
   const titleInput = document.createElement("input");
   titleInput.className = "note-form__input";
   titleInput.type = "text";
-  titleInput.required = true;
   titleInput.value = isEdit ? existingEntry.title || "" : "";
   titleLabel.appendChild(titleInput);
 
@@ -319,7 +380,9 @@ function renderForm(existingEntry) {
   const tagsInput = document.createElement("input");
   tagsInput.className = "note-form__input";
   tagsInput.type = "text";
-  tagsInput.value = isEdit ? tagsToText(existingEntry.tags) : "";
+  // "タイトル未設定" タグはサーバー側が自動管理するので、編集フォーム上は隠しておく
+  // (ユーザーがタイトルを埋めれば保存時に自動で外れる)
+  tagsInput.value = isEdit ? tagsToText((existingEntry.tags || []).filter((t) => t !== UNTITLED_TAG)) : "";
   tagsLabel.appendChild(tagsInput);
 
   const feedback = document.createElement("p");
@@ -371,11 +434,55 @@ function renderForm(existingEntry) {
   el.view.appendChild(form);
 }
 
+/* ---- interaction: 一覧の読み込み ---- */
+
+async function loadList({ reset }) {
+  const offset = reset ? 0 : state.items.length;
+
+  try {
+    const data = await fetchList({ offset });
+    state.items = reset ? data.items : [...state.items, ...data.items];
+    state.total = data.total;
+    state.hasMore = data.hasMore;
+    mergeKnownTags(data.items);
+    renderTagFilter();
+    renderList();
+    return true;
+  } catch (err) {
+    console.error("[notes] 一覧の読み込みに失敗しました:", err);
+    showListStatus("一覧を読み込めませんでした。時間をおいて再度お試しください。", "error");
+    return false;
+  }
+}
+
+async function handleLoadMore() {
+  el.loadMoreButton.disabled = true;
+  await loadList({ reset: false });
+}
+
+/* ---- interaction: 検索 / タグ絞り込み ---- */
+
+function handleSearchInput(event) {
+  const value = event.target.value;
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => {
+    state.query = value;
+    showListStatus("読み込み中…");
+    loadList({ reset: true });
+  }, 300);
+}
+
+function handleTagChipClick(tag) {
+  state.activeTag = state.activeTag === tag ? null : tag;
+  showListStatus("読み込み中…");
+  loadList({ reset: true });
+}
+
 /* ---- interaction: 一覧選択 ---- */
 
 async function selectEntry(id) {
   state.selectedId = id;
-  renderList(state.items); // 選択状態(強調表示)を反映するため再描画
+  renderList(); // 選択状態(強調表示)を反映するため再描画
 
   showViewStatus("読み込み中…");
   try {
@@ -392,7 +499,7 @@ function showEmptySelectionOrFirst() {
     selectEntry(state.items[0].id);
   } else {
     state.selectedId = null;
-    renderList(state.items);
+    renderList();
     showViewStatus("メモがまだありません。「+ 新規」から作成できます。");
   }
 }
@@ -410,8 +517,9 @@ function showEditForm(entry) {
 /* ---- interaction: フォーム送信 ---- */
 
 async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton, feedback }) {
-  if (!title || !content) {
-    feedback.textContent = "タイトルと本文を入力してください。";
+  // タイトルは空欄可。本文だけは必須(サーバー側のcontent_requiredと対応)。
+  if (!content) {
+    feedback.textContent = "本文を入力してください。";
     feedback.dataset.tone = "error";
     return;
   }
@@ -445,10 +553,8 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
     feedback.textContent = "保存しました。";
     feedback.dataset.tone = "success";
 
-    const items = await fetchIndex();
-    state.items = sortByDateDesc(items);
     state.selectedId = savedEntry.id;
-    renderList(state.items);
+    await loadList({ reset: true });
     renderEntry(savedEntry);
   } catch (err) {
     console.error("[notes] 保存中に例外が発生しました:", err);
@@ -475,8 +581,7 @@ async function handleDeleteClick(id) {
       return;
     }
 
-    const items = await fetchIndex();
-    state.items = sortByDateDesc(items);
+    await loadList({ reset: true });
     showEmptySelectionOrFirst();
   } catch (err) {
     console.error("[notes] 削除中に例外が発生しました:", err);
@@ -499,6 +604,8 @@ function toggleTheme() {
 async function init() {
   el.themeToggle.addEventListener("click", toggleTheme);
   el.newNoteButton.addEventListener("click", showCreateForm);
+  el.searchInput.addEventListener("input", handleSearchInput);
+  el.loadMoreButton.addEventListener("click", handleLoadMore);
 
   const configProblem = assertConfigIsSet();
   if (configProblem) {
@@ -510,23 +617,18 @@ async function init() {
   showListStatus("読み込み中…");
   showViewStatus("メモを選択してください。");
 
-  try {
-    const items = await fetchIndex();
-    state.items = sortByDateDesc(items);
-
-    if (state.items.length === 0) {
-      renderList(state.items);
-      showViewStatus("メモがまだありません。「+ 新規」から作成できます。");
-      return;
-    }
-
-    renderList(state.items);
-    await selectEntry(state.items[0].id);
-  } catch (err) {
-    console.error("[notes] 一覧の読み込みに失敗しました:", err);
-    showListStatus("一覧を読み込めませんでした。時間をおいて再度お試しください。", "error");
+  const ok = await loadList({ reset: true });
+  if (!ok) {
     showViewStatus("メモを選択してください。");
+    return;
   }
+
+  if (state.items.length === 0) {
+    showViewStatus("メモがまだありません。「+ 新規」から作成できます。");
+    return;
+  }
+
+  await selectEntry(state.items[0].id);
 }
 
 document.addEventListener("DOMContentLoaded", init);

@@ -1,19 +1,21 @@
 /**
  * notes-api (Cloudflare Workers)
  *
- * R2への書き込みはここ経由のみに限定する。フロントから直接PUTはさせない。
+ * D1 = 本文・メタデータ本体。R2 = 画像のみ。
  * アクセス制御はCloudflare Access側で行うため、ここには認証ロジックを持たせない。
  *
  * Endpoints:
- *   GET    /api/notes        -> index.json を返す
- *   GET    /api/notes/:id    -> entries/:id.json を返す
- *   POST   /api/notes        -> 新規作成
- *   PUT    /api/notes/:id    -> 更新
- *   DELETE /api/notes/:id    -> 削除
+ *   GET    /api/notes?limit=&offset=&q=&tag=  -> 一覧(検索/タグ絞り込み/ページング)
+ *   GET    /api/notes/:id                     -> 詳細(本文全文・画像キー含む)
+ *   POST   /api/notes                          -> 新規作成
+ *   PUT    /api/notes/:id                      -> 更新
+ *   DELETE /api/notes/:id                      -> 削除
+ *   GET    /api/images/:key                    -> R2から画像を返す(遅延読み込み用)
  */
 
-const INDEX_KEY = "notes/index.json";
-const entryKey = (id) => `notes/entries/${id}.json`;
+const UNTITLED_TAG = "タイトル未設定";
+const MAX_LIMIT = 100;
+const DEFAULT_LIMIT = 20;
 
 /* ---------------------------------------------------------------------- */
 /* CORS                                                                    */
@@ -42,92 +44,186 @@ function emptyResponse(status, env) {
 }
 
 /* ---------------------------------------------------------------------- */
-/* R2 アクセス層                                                          */
+/* タイトル未入力ルール — POST/PUT どちらからも呼ぶ共通関数              */
 /* ---------------------------------------------------------------------- */
 
-async function readJson(bucket, key) {
-  const object = await bucket.get(key);
-  if (!object) return null;
-  const text = await object.text();
-  return JSON.parse(text);
+function normalizeTitleAndTags(rawTitle, rawTags) {
+  const title = typeof rawTitle === "string" ? rawTitle.trim() : "";
+  const tags = Array.isArray(rawTags) ? rawTags.filter((t) => typeof t === "string" && t.trim()) : [];
+
+  if (!title) {
+    const withUntitledTag = tags.includes(UNTITLED_TAG) ? tags : [...tags, UNTITLED_TAG];
+    return { title: null, tags: withUntitledTag };
+  }
+
+  return { title, tags: tags.filter((t) => t !== UNTITLED_TAG) };
 }
 
-async function writeJson(bucket, key, value) {
-  await bucket.put(key, JSON.stringify(value), {
-    httpMetadata: { contentType: "application/json" },
-  });
+/* ---------------------------------------------------------------------- */
+/* tags <-> DB 文字列 変換                                                */
+/* ---------------------------------------------------------------------- */
+
+function tagsToDb(tags) {
+  return Array.isArray(tags) ? tags.join(",") : "";
 }
 
-async function getIndex(env) {
-  const items = await readJson(env.NOTES_BUCKET, INDEX_KEY);
-  return items || [];
+function tagsFromDb(text) {
+  return text ? text.split(",").filter((t) => t.length > 0) : [];
 }
 
-async function putIndex(env, items) {
-  await writeJson(env.NOTES_BUCKET, INDEX_KEY, items);
+/* ---------------------------------------------------------------------- */
+/* 行 -> レスポンス形式 変換                                              */
+/* ---------------------------------------------------------------------- */
+
+function rowToListItem(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    date: row.date,
+    updatedAt: row.updated_at,
+    tags: tagsFromDb(row.tags),
+    summary: (row.content || "").slice(0, 100),
+  };
 }
 
-async function getEntry(env, id) {
-  return readJson(env.NOTES_BUCKET, entryKey(id));
-}
-
-async function putEntry(env, id, entry) {
-  await writeJson(env.NOTES_BUCKET, entryKey(id), entry);
-}
-
-async function deleteEntry(env, id) {
-  await env.NOTES_BUCKET.delete(entryKey(id));
+function rowToDetail(row) {
+  return {
+    id: row.id,
+    title: row.title,
+    content: row.content,
+    date: row.date,
+    updatedAt: row.updated_at,
+    tags: tagsFromDb(row.tags),
+    format: "plain",
+    imageKeys: JSON.parse(row.image_keys || "[]"),
+  };
 }
 
 /* ---------------------------------------------------------------------- */
 /* ID採番: YYYY-MM-DD-NNN (同日連番, 3桁ゼロ埋め)                          */
 /* ---------------------------------------------------------------------- */
 
-function generateId(items, now = new Date()) {
+async function generateId(env, now = new Date()) {
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const d = String(now.getDate()).padStart(2, "0");
   const datePrefix = `${y}-${m}-${d}`;
 
-  const todaysSeqs = items
-    .map((item) => item.id)
-    .filter((id) => typeof id === "string" && id.startsWith(datePrefix))
-    .map((id) => Number(id.slice(datePrefix.length + 1)))
+  const { results } = await env.DB.prepare("SELECT id FROM notes WHERE id LIKE ?")
+    .bind(`${datePrefix}-%`)
+    .all();
+
+  const seqs = (results || [])
+    .map((row) => Number(row.id.slice(datePrefix.length + 1)))
     .filter((n) => Number.isInteger(n));
 
-  const nextSeq = todaysSeqs.length > 0 ? Math.max(...todaysSeqs) + 1 : 1;
+  const nextSeq = seqs.length > 0 ? Math.max(...seqs) + 1 : 1;
   return `${datePrefix}-${String(nextSeq).padStart(3, "0")}`;
 }
 
 /* ---------------------------------------------------------------------- */
-/* index.json 用メタデータへの変換                                        */
+/* 画像 (R2)                                                              */
 /* ---------------------------------------------------------------------- */
 
-function toIndexMeta(entry) {
-  return {
-    id: entry.id,
-    title: entry.title,
-    date: entry.date,
-    summary: (entry.content || "").slice(0, 60),
-    tags: entry.tags || [],
-  };
+const EXTENSION_BY_CONTENT_TYPE = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
+
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function uploadImages(env, noteId, images, startIndex) {
+  const uploadedKeys = [];
+  let index = startIndex;
+  for (const image of images) {
+    if (!image || typeof image.data !== "string") continue;
+    const contentType = image.contentType || "application/octet-stream";
+    const extension = EXTENSION_BY_CONTENT_TYPE[contentType] || "bin";
+    const key = `images/${noteId}-${index}.${extension}`;
+    const bytes = base64ToBytes(image.data);
+    await env.IMAGES_BUCKET.put(key, bytes, { httpMetadata: { contentType } });
+    uploadedKeys.push(key);
+    index += 1;
+  }
+  return uploadedKeys;
+}
+
+async function deleteImages(env, keys) {
+  for (const key of keys) {
+    try {
+      await env.IMAGES_BUCKET.delete(key);
+    } catch (err) {
+      // 個別の削除失敗はログの必要はあるが、他の後始末は止めない
+    }
+  }
 }
 
 /* ---------------------------------------------------------------------- */
-/* ハンドラ                                                                */
+/* ハンドラ: 一覧 (検索・タグ絞り込み・ページング)                        */
 /* ---------------------------------------------------------------------- */
 
-async function handleGetIndex(env) {
-  const items = await getIndex(env);
-  return jsonResponse(items, 200, env);
+async function handleList(url, env) {
+  const params = url.searchParams;
+  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(params.get("limit") || String(DEFAULT_LIMIT), 10) || DEFAULT_LIMIT));
+  const offset = Math.max(0, parseInt(params.get("offset") || "0", 10) || 0);
+  const q = (params.get("q") || "").trim();
+  const tag = (params.get("tag") || "").trim();
+
+  const conditions = [];
+  const bindings = [];
+
+  if (q) {
+    conditions.push("(title LIKE ? OR content LIKE ?)");
+    bindings.push(`%${q}%`, `%${q}%`);
+  }
+  if (tag) {
+    conditions.push("(',' || tags || ',') LIKE ?");
+    bindings.push(`%,${tag},%`);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+
+  const countStmt = env.DB.prepare(`SELECT COUNT(*) as count FROM notes ${whereClause}`).bind(...bindings);
+  const countResult = await countStmt.first();
+  const total = countResult ? countResult.count : 0;
+
+  const listStmt = env.DB
+    .prepare(
+      `SELECT id, title, date, updated_at, tags, content FROM notes ${whereClause} ORDER BY date DESC LIMIT ? OFFSET ?`
+    )
+    .bind(...bindings, limit, offset);
+  const { results } = await listStmt.all();
+
+  const items = (results || []).map(rowToListItem);
+
+  return jsonResponse(
+    {
+      items,
+      total,
+      limit,
+      offset,
+      hasMore: offset + items.length < total,
+    },
+    200,
+    env
+  );
 }
 
 async function handleGetEntry(env, id) {
-  const entry = await getEntry(env, id);
-  if (!entry) {
+  const row = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
+  if (!row) {
     return jsonResponse({ error: "not_found" }, 404, env);
   }
-  return jsonResponse(entry, 200, env);
+  return jsonResponse(rowToDetail(row), 200, env);
 }
 
 async function handleCreate(request, env) {
@@ -138,40 +234,37 @@ async function handleCreate(request, env) {
     return jsonResponse({ error: "invalid_json" }, 400, env);
   }
 
-  if (!body || typeof body.title !== "string" || typeof body.content !== "string") {
-    return jsonResponse({ error: "title_and_content_required" }, 400, env);
+  if (!body || typeof body.content !== "string") {
+    return jsonResponse({ error: "content_required" }, 400, env);
   }
 
-  const items = await getIndex(env);
+  const { title, tags } = normalizeTitleAndTags(body.title, body.tags);
+  const id = await generateId(env);
   const now = new Date().toISOString();
-  const id = generateId(items, new Date());
 
-  const entry = {
-    id,
-    title: body.title,
-    date: now,
-    updatedAt: now,
-    tags: Array.isArray(body.tags) ? body.tags : [],
-    content: body.content,
-    format: "plain",
-  };
-
-  try {
-    await putEntry(env, id, entry);
-  } catch (err) {
-    return jsonResponse({ error: "entry_write_failed" }, 500, env);
+  let imageKeys = [];
+  if (Array.isArray(body.images) && body.images.length > 0) {
+    try {
+      imageKeys = await uploadImages(env, id, body.images, 1);
+    } catch (err) {
+      return jsonResponse({ error: "image_upload_failed" }, 500, env);
+    }
   }
 
   try {
-    const nextItems = [...items, toIndexMeta(entry)];
-    await putIndex(env, nextItems);
+    await env.DB.prepare(
+      "INSERT INTO notes (id, title, content, date, updated_at, tags, image_keys) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    )
+      .bind(id, title, body.content, now, now, tagsToDb(tags), JSON.stringify(imageKeys))
+      .run();
   } catch (err) {
-    // index更新に失敗した場合、本体だけが孤立して残るのを避けるため削除する
-    await deleteEntry(env, id).catch(() => {});
-    return jsonResponse({ error: "index_write_failed" }, 500, env);
+    // D1書き込みに失敗した場合、先にアップロードした画像が孤立するのを避けて削除する
+    await deleteImages(env, imageKeys);
+    return jsonResponse({ error: "db_write_failed" }, 500, env);
   }
 
-  return jsonResponse(entry, 201, env);
+  const row = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
+  return jsonResponse(rowToDetail(row), 201, env);
 }
 
 async function handleUpdate(request, env, id) {
@@ -182,63 +275,79 @@ async function handleUpdate(request, env, id) {
     return jsonResponse({ error: "invalid_json" }, 400, env);
   }
 
-  if (!body || typeof body.title !== "string" || typeof body.content !== "string") {
-    return jsonResponse({ error: "title_and_content_required" }, 400, env);
+  if (!body || typeof body.content !== "string") {
+    return jsonResponse({ error: "content_required" }, 400, env);
   }
 
-  const existing = await getEntry(env, id);
+  const existing = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
   if (!existing) {
     return jsonResponse({ error: "not_found" }, 404, env);
   }
 
-  const updatedEntry = {
-    ...existing,
-    title: body.title,
-    content: body.content,
-    tags: Array.isArray(body.tags) ? body.tags : existing.tags || [],
-    updatedAt: new Date().toISOString(),
-  };
+  const { title, tags } = normalizeTitleAndTags(body.title, body.tags);
+  let imageKeys = JSON.parse(existing.image_keys || "[]");
 
-  try {
-    await putEntry(env, id, updatedEntry);
-  } catch (err) {
-    return jsonResponse({ error: "entry_write_failed" }, 500, env);
+  const removeKeys = Array.isArray(body.removeImageKeys) ? body.removeImageKeys : [];
+  if (removeKeys.length > 0) {
+    await deleteImages(env, removeKeys);
+    imageKeys = imageKeys.filter((key) => !removeKeys.includes(key));
   }
 
-  try {
-    const items = await getIndex(env);
-    const nextItems = items.map((item) =>
-      item.id === id ? toIndexMeta(updatedEntry) : item
-    );
-    await putIndex(env, nextItems);
-  } catch (err) {
-    return jsonResponse({ error: "index_write_failed" }, 500, env);
+  let newlyUploadedKeys = [];
+  if (Array.isArray(body.images) && body.images.length > 0) {
+    try {
+      newlyUploadedKeys = await uploadImages(env, id, body.images, imageKeys.length + 1);
+      imageKeys = [...imageKeys, ...newlyUploadedKeys];
+    } catch (err) {
+      return jsonResponse({ error: "image_upload_failed" }, 500, env);
+    }
   }
 
-  return jsonResponse(updatedEntry, 200, env);
+  const updatedAt = new Date().toISOString();
+
+  try {
+    await env.DB.prepare(
+      "UPDATE notes SET title = ?, content = ?, tags = ?, image_keys = ?, updated_at = ? WHERE id = ?"
+    )
+      .bind(title, body.content, tagsToDb(tags), JSON.stringify(imageKeys), updatedAt, id)
+      .run();
+  } catch (err) {
+    // 新規追加分の画像だけはロールバック可能。削除済み画像の復元はできないため、
+    // ここに来ることは基本的に避けたい(D1書き込み失敗は稀なケース)。
+    await deleteImages(env, newlyUploadedKeys);
+    return jsonResponse({ error: "db_write_failed" }, 500, env);
+  }
+
+  const row = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
+  return jsonResponse(rowToDetail(row), 200, env);
 }
 
 async function handleDelete(env, id) {
-  const existing = await getEntry(env, id);
+  const existing = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
   if (!existing) {
     return jsonResponse({ error: "not_found" }, 404, env);
   }
 
-  try {
-    await deleteEntry(env, id);
-  } catch (err) {
-    return jsonResponse({ error: "entry_delete_failed" }, 500, env);
-  }
+  const imageKeys = JSON.parse(existing.image_keys || "[]");
+  await deleteImages(env, imageKeys);
 
   try {
-    const items = await getIndex(env);
-    const nextItems = items.filter((item) => item.id !== id);
-    await putIndex(env, nextItems);
+    await env.DB.prepare("DELETE FROM notes WHERE id = ?").bind(id).run();
   } catch (err) {
-    return jsonResponse({ error: "index_write_failed" }, 500, env);
+    return jsonResponse({ error: "db_delete_failed" }, 500, env);
   }
 
   return emptyResponse(204, env);
+}
+
+async function handleGetImage(env, key) {
+  const object = await env.IMAGES_BUCKET.get(key);
+  if (!object) {
+    return jsonResponse({ error: "not_found" }, 404, env);
+  }
+  const headers = new Headers(corsHeaders(env));
+  headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
+  return new Response(object.body, { status: 200, headers });
 }
 
 /* ---------------------------------------------------------------------- */
@@ -252,8 +361,20 @@ export default {
     }
 
     const url = new URL(request.url);
-    const parts = url.pathname.split("/").filter(Boolean); // ["api", "notes", ":id"?]
 
+    if (url.pathname.startsWith("/api/images/")) {
+      if (request.method !== "GET") {
+        return jsonResponse({ error: "method_not_allowed" }, 405, env);
+      }
+      const key = decodeURIComponent(url.pathname.slice("/api/images/".length));
+      try {
+        return await handleGetImage(env, key);
+      } catch (err) {
+        return jsonResponse({ error: "internal_error" }, 500, env);
+      }
+    }
+
+    const parts = url.pathname.split("/").filter(Boolean); // ["api", "notes", ":id"?]
     if (parts[0] !== "api" || parts[1] !== "notes") {
       return jsonResponse({ error: "not_found" }, 404, env);
     }
@@ -262,7 +383,7 @@ export default {
 
     try {
       if (request.method === "GET" && !id) {
-        return await handleGetIndex(env);
+        return await handleList(url, env);
       }
       if (request.method === "GET" && id) {
         return await handleGetEntry(env, id);

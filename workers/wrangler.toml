@@ -2,8 +2,16 @@ name = "notes-api"
 main = "src/index.js"
 compatibility_date = "2026-07-01"
 
+# D1: テキスト・メタデータ本体
+# database_id は `wrangler d1 create oyuzen-notes` 実行後に発行されるIDに置き換える
+[[d1_databases]]
+binding = "DB"
+database_name = "oyuzen-notes"
+database_id = ""65e6c9d1-581f-4586-b7c6-11fe371ea190""
+
+# R2: 画像のみを保存する(index.json方式は廃止)
 [[r2_buckets]]
-binding = "NOTES_BUCKET"
+binding = "IMAGES_BUCKET"
 bucket_name = "oyuzen"
 
 # 許可するフロントのオリジン。Pages側のドメインに合わせて変更する。

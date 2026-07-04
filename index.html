@@ -26,9 +26,8 @@
       id="search-input"
       class="toolbar__search"
       type="search"
-      placeholder="検索(準備中)"
+      placeholder="タイトル・本文・タグで検索"
       aria-label="メモを検索"
-      disabled
     >
     <button
       id="new-note-button"
@@ -41,9 +40,13 @@
 
   <main class="app-main">
     <section class="note-list-pane" aria-label="メモ一覧">
+      <div id="tag-filter" class="tag-filter" hidden></div>
       <ol id="note-list" class="note-list">
         <!-- renderList() が <li class="note-list__item"> をここに挿入する -->
       </ol>
+      <button id="load-more-button" class="load-more-button" type="button" hidden>
+        もっと見る
+      </button>
       <p id="note-list-status" class="pane-status" hidden></p>
     </section>
 
