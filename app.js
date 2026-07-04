@@ -32,6 +32,10 @@ function assertConfigIsSet() {
 
 const PAGE_SIZE = 20;
 const UNTITLED_TAG = "タイトル未設定";
+const DEFAULT_SORT = "pinned";
+const SORT_STORAGE_KEY = "notes:sort";
+const DRAFT_STORAGE_PREFIX = "notes:draft:";
+const DRAFT_SAVE_DELAY = 350;
 
 // アプリの状態はここだけで持つ（localStorageは使わない）
 const state = {
@@ -41,11 +45,13 @@ const state = {
   selectedId: null,
   query: "",
   activeTag: null,
+  sort: DEFAULT_SORT,
   theme: "light",
   knownTags: new Set(), // タグチップ表示用。読み込んだ範囲から見えたタグを蓄積するだけの簡易実装
 };
 
 let searchDebounceTimer = null;
+let draftSaveTimer = null;
 
 /* ---- DOM references ---- */
 
@@ -57,12 +63,69 @@ const el = {
   themeToggle: document.getElementById("theme-toggle"),
   newNoteButton: document.getElementById("new-note-button"),
   searchInput: document.getElementById("search-input"),
+  sortSelect: document.getElementById("sort-select"),
   tagFilter: document.getElementById("tag-filter"),
   loadMoreButton: document.getElementById("load-more-button"),
 };
 
 function isCompactScreen() {
   return window.matchMedia("(max-width: 767px)").matches;
+}
+
+function normalizeSortValue(value) {
+  return ["pinned", "updated", "created", "title"].includes(value) ? value : DEFAULT_SORT;
+}
+
+function getStoredSort() {
+  try {
+    return normalizeSortValue(localStorage.getItem(SORT_STORAGE_KEY) || DEFAULT_SORT);
+  } catch (err) {
+    return DEFAULT_SORT;
+  }
+}
+
+function saveStoredSort(sort) {
+  try {
+    localStorage.setItem(SORT_STORAGE_KEY, sort);
+  } catch (err) {
+    // noop
+  }
+}
+
+function getDraftStorageKey(entryId) {
+  return `${DRAFT_STORAGE_PREFIX}${entryId || "new"}`;
+}
+
+function readDraft(entryId) {
+  try {
+    const raw = localStorage.getItem(getDraftStorageKey(entryId));
+    return raw ? JSON.parse(raw) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function writeDraft(entryId, draft) {
+  try {
+    localStorage.setItem(getDraftStorageKey(entryId), JSON.stringify(draft));
+  } catch (err) {
+    // noop
+  }
+}
+
+function clearDraft(entryId) {
+  try {
+    localStorage.removeItem(getDraftStorageKey(entryId));
+  } catch (err) {
+    // noop
+  }
+}
+
+function isTextEntryElement(element) {
+  if (!element || !(element instanceof HTMLElement)) {
+    return false;
+  }
+  return element.matches("input, textarea, select") || element.isContentEditable;
 }
 
 function insertMarkdownInline(textarea, before, after = "") {
@@ -164,6 +227,7 @@ async function fetchList({ offset }) {
   const url = new URL(CONFIG.indexUrl);
   url.searchParams.set("limit", String(PAGE_SIZE));
   url.searchParams.set("offset", String(offset));
+  url.searchParams.set("sort", state.sort);
   if (state.query) url.searchParams.set("q", state.query);
   if (state.activeTag) url.searchParams.set("tag", state.activeTag);
 
@@ -195,6 +259,14 @@ async function updateEntry(id, data) {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
+  });
+}
+
+async function togglePinnedEntry(id, pinned) {
+  return fetch(`${CONFIG.entryBaseUrl}${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pinned }),
   });
 }
 
@@ -338,7 +410,7 @@ function renderList() {
 
     const title = document.createElement("p");
     title.className = "note-list__title";
-    title.textContent = item.title || "(無題)";
+    title.textContent = `${item.pinned ? "★ " : ""}${item.title || "(無題)"}`;
 
     const meta = document.createElement("div");
     meta.className = "note-list__meta";
@@ -508,6 +580,14 @@ function updateLoadMoreVisibility() {
   el.loadMoreButton.disabled = false;
 }
 
+function saveFormDraft(entryId, draft) {
+  if (!draft.title && !draft.content && !draft.tags) {
+    clearDraft(entryId);
+    return;
+  }
+  writeDraft(entryId, draft);
+}
+
 /* ---- rendering: 本文(閲覧) ---- */
 
 function renderEntry(entry) {
@@ -523,6 +603,12 @@ function renderEntry(entry) {
   editButton.textContent = "編集";
   editButton.addEventListener("click", () => showEditForm(entry));
 
+  const pinButton = document.createElement("button");
+  pinButton.type = "button";
+  pinButton.className = "note-view__action-button";
+  pinButton.textContent = entry.pinned ? "固定済み" : "固定";
+  pinButton.addEventListener("click", () => handlePinToggle(entry));
+
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "note-view__action-button note-view__action-button--danger";
@@ -530,6 +616,7 @@ function renderEntry(entry) {
   deleteButton.addEventListener("click", () => handleDeleteClick(entry.id));
 
   actions.appendChild(editButton);
+  actions.appendChild(pinButton);
   actions.appendChild(deleteButton);
 
   const title = document.createElement("h2");
@@ -573,6 +660,7 @@ function renderForm(existingEntry) {
   el.view.replaceChildren();
 
   const isEdit = Boolean(existingEntry);
+  const draft = readDraft(isEdit ? existingEntry.id : "new");
 
   const heading = document.createElement("h2");
   heading.className = "note-view__title";
@@ -587,7 +675,7 @@ function renderForm(existingEntry) {
   const titleInput = document.createElement("input");
   titleInput.className = "note-form__input";
   titleInput.type = "text";
-  titleInput.value = isEdit ? existingEntry.title || "" : "";
+  titleInput.value = draft ? draft.title || "" : isEdit ? existingEntry.title || "" : "";
   titleLabel.appendChild(titleInput);
 
   const contentLabel = document.createElement("label");
@@ -596,7 +684,7 @@ function renderForm(existingEntry) {
   const contentInput = document.createElement("textarea");
   contentInput.className = "note-form__textarea";
   contentInput.required = true;
-  contentInput.value = isEdit ? existingEntry.content || "" : "";
+  contentInput.value = draft ? draft.content || "" : isEdit ? existingEntry.content || "" : "";
   contentLabel.appendChild(contentInput);
 
   const editorToolbar = document.createElement("div");
@@ -639,7 +727,11 @@ function renderForm(existingEntry) {
   tagsInput.setAttribute("list", "tag-suggestions");
   // "タイトル未設定" タグはサーバー側が自動管理するので、編集フォーム上は隠しておく
   // (ユーザーがタイトルを埋めれば保存時に自動で外れる)
-  tagsInput.value = isEdit ? tagsToText((existingEntry.tags || []).filter((t) => t !== UNTITLED_TAG)) : "";
+  tagsInput.value = draft
+    ? draft.tags || ""
+    : isEdit
+      ? tagsToText((existingEntry.tags || []).filter((t) => t !== UNTITLED_TAG))
+      : "";
   tagsLabel.appendChild(tagsInput);
 
   const tagsHint = document.createElement("p");
@@ -659,6 +751,10 @@ function renderForm(existingEntry) {
 
   const feedback = document.createElement("p");
   feedback.className = "form-feedback";
+  if (draft) {
+    feedback.textContent = "下書きを復元しました。";
+    feedback.dataset.tone = "info";
+  }
 
   const previewDetails = document.createElement("details");
   previewDetails.className = "note-form__preview";
@@ -672,9 +768,27 @@ function renderForm(existingEntry) {
   previewBody.className = "note-form__preview-body";
 
   let isSyncingScroll = false;
+  let draftQueueArmed = false;
+
+  const queueDraftSave = () => {
+    draftQueueArmed = true;
+    clearTimeout(draftSaveTimer);
+    draftSaveTimer = setTimeout(() => {
+      if (!draftQueueArmed) {
+        return;
+      }
+      saveFormDraft(isEdit ? existingEntry.id : "new", {
+        title: titleInput.value,
+        content: contentInput.value,
+        tags: tagsInput.value,
+      });
+      draftQueueArmed = false;
+    }, DRAFT_SAVE_DELAY);
+  };
 
   const updatePreview = () => {
     renderMarkdownContent(previewBody, contentInput.value);
+    queueDraftSave();
   };
 
   const syncPreviewFromEditor = () => {
@@ -692,6 +806,8 @@ function renderForm(existingEntry) {
   };
 
   contentInput.addEventListener("input", updatePreview);
+  titleInput.addEventListener("input", queueDraftSave);
+  tagsInput.addEventListener("input", queueDraftSave);
   contentInput.addEventListener("scroll", syncPreviewFromEditor, { passive: true });
   previewBody.addEventListener("scroll", syncEditorFromPreview, { passive: true });
   updatePreview();
@@ -745,6 +861,11 @@ function renderForm(existingEntry) {
     });
   });
 
+  window.setTimeout(() => {
+    const focusTarget = draft && draft.title ? titleInput : contentInput;
+    focusTarget.focus();
+  }, 0);
+
   el.view.appendChild(heading);
   el.view.appendChild(form);
 }
@@ -793,6 +914,13 @@ function handleTagChipClick(tag) {
   loadList({ reset: true });
 }
 
+function handleSortChange(event) {
+  state.sort = normalizeSortValue(event.target.value);
+  saveStoredSort(state.sort);
+  showListStatus("読み込み中…");
+  loadList({ reset: true });
+}
+
 /* ---- interaction: 一覧選択 ---- */
 
 async function selectEntry(id) {
@@ -822,6 +950,8 @@ function showEmptySelectionOrFirst() {
 /* ---- interaction: 新規作成 / 編集フォーム表示 ---- */
 
 function showCreateForm() {
+  state.selectedId = null;
+  renderList();
   renderForm(null);
 }
 
@@ -865,6 +995,7 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
     }
 
     const savedEntry = await response.json();
+    clearDraft(isEdit ? id : "new");
     feedback.textContent = "保存しました。";
     feedback.dataset.tone = "success";
 
@@ -876,6 +1007,68 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
     feedback.textContent = `保存に失敗しました (${err && err.message ? err.message : "不明なエラー"})`;
     feedback.dataset.tone = "error";
     submitButton.disabled = false;
+  }
+}
+
+async function handlePinToggle(entry) {
+  const nextPinned = !Boolean(entry.pinned);
+
+  try {
+    const response = await togglePinnedEntry(entry.id, nextPinned);
+
+    if (!response.ok) {
+      const detail = await describeFailedResponse(response);
+      console.error(`[notes] 固定切り替え失敗 (PATCH): ${detail}`);
+      showViewStatus(`固定の切り替えに失敗しました (${detail})`, "error");
+      return;
+    }
+
+    const savedEntry = await response.json();
+    state.selectedId = savedEntry.id;
+    await loadList({ reset: true });
+    renderEntry(savedEntry);
+  } catch (err) {
+    console.error("[notes] 固定切り替え中に例外が発生しました:", err);
+    showViewStatus(`固定の切り替えに失敗しました (${err && err.message ? err.message : "不明なエラー"})`, "error");
+  }
+}
+
+function handleGlobalShortcut(event) {
+  if (event.defaultPrevented || event.altKey) {
+    return;
+  }
+
+  const target = event.target;
+  const key = event.key.toLowerCase();
+  const form = el.view.querySelector("form");
+
+  if (key === "/" && !isTextEntryElement(target) && !form) {
+    event.preventDefault();
+    el.searchInput.focus();
+    el.searchInput.select();
+    return;
+  }
+
+  if (key === "n" && !isTextEntryElement(target) && !form) {
+    event.preventDefault();
+    state.selectedId = null;
+    renderList();
+    showCreateForm();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && key === "s" && form) {
+    event.preventDefault();
+    form.requestSubmit();
+    return;
+  }
+
+  if (key === "escape" && form) {
+    event.preventDefault();
+    const cancelButton = form.querySelector(".note-form__cancel");
+    if (cancelButton instanceof HTMLButtonElement) {
+      cancelButton.click();
+    }
   }
 }
 
@@ -929,6 +1122,7 @@ async function toggleTheme() {
 /* ---- boot ---- */
 
 async function init() {
+  state.sort = getStoredSort();
   await loadThemeSetting();
 
   el.themeToggle.addEventListener("click", () => {
@@ -936,7 +1130,10 @@ async function init() {
   });
   el.newNoteButton.addEventListener("click", showCreateForm);
   el.searchInput.addEventListener("input", handleSearchInput);
+  el.sortSelect.value = state.sort;
+  el.sortSelect.addEventListener("change", handleSortChange);
   el.loadMoreButton.addEventListener("click", handleLoadMore);
+  document.addEventListener("keydown", handleGlobalShortcut);
 
   const configProblem = assertConfigIsSet();
   if (configProblem) {

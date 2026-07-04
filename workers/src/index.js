@@ -5,10 +5,11 @@
  * アクセス制御はCloudflare Access側で行うため、ここには認証ロジックを持たせない。
  *
  * Endpoints:
- *   GET    /api/notes?limit=&offset=&q=&tag=  -> 一覧(検索/タグ絞り込み/ページング)
+ *   GET    /api/notes?limit=&offset=&q=&tag=&sort= -> 一覧(検索/タグ絞り込み/並び替え/ページング)
  *   GET    /api/notes/:id                     -> 詳細(本文全文・画像キー含む)
  *   POST   /api/notes                          -> 新規作成
  *   PUT    /api/notes/:id                      -> 更新
+ *   PATCH  /api/notes/:id                      -> pin切り替え
  *   DELETE /api/notes/:id                      -> 削除
  *   GET    /api/images/:key                    -> R2から画像を返す(遅延読み込み用)
  */
@@ -17,6 +18,14 @@ const UNTITLED_TAG = "タイトル未設定";
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
 const DEFAULT_THEME = "light";
+const DEFAULT_SORT = "pinned";
+
+const SORT_SQL = {
+  pinned: "pinned DESC, updated_at DESC, date DESC, id DESC",
+  updated: "updated_at DESC, date DESC, id DESC",
+  created: "date DESC, id DESC",
+  title: "COALESCE(title, '') COLLATE NOCASE ASC, date DESC, id DESC",
+};
 
 /* ---------------------------------------------------------------------- */
 /* CORS                                                                    */
@@ -25,7 +34,7 @@ const DEFAULT_THEME = "light";
 function corsHeaders(env) {
   return {
     "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
-    "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
   };
 }
@@ -89,6 +98,7 @@ function rowToListItem(row) {
     title: row.title,
     date: row.date,
     updatedAt: row.updated_at,
+    pinned: Number(row.pinned || 0) === 1,
     tags: tagsFromDb(row.tags),
     summary: (row.content || "").slice(0, 100),
   };
@@ -101,6 +111,7 @@ function rowToDetail(row) {
     content: row.content,
     date: row.date,
     updatedAt: row.updated_at,
+    pinned: Number(row.pinned || 0) === 1,
     tags: tagsFromDb(row.tags),
     format: "plain",
     imageKeys: JSON.parse(row.image_keys || "[]"),
@@ -228,6 +239,7 @@ async function handleList(url, env) {
   const offset = Math.max(0, parseInt(params.get("offset") || "0", 10) || 0);
   const q = (params.get("q") || "").trim();
   const tag = (params.get("tag") || "").trim();
+  const sort = SORT_SQL[params.get("sort") || DEFAULT_SORT] || SORT_SQL[DEFAULT_SORT];
 
   const conditions = [];
   const bindings = [];
@@ -249,7 +261,7 @@ async function handleList(url, env) {
 
   const listStmt = env.DB
     .prepare(
-      `SELECT id, title, date, updated_at, tags, content FROM notes ${whereClause} ORDER BY date DESC LIMIT ? OFFSET ?`
+      `SELECT id, title, date, updated_at, tags, content, pinned FROM notes ${whereClause} ORDER BY ${sort} LIMIT ? OFFSET ?`
     )
     .bind(...bindings, limit, offset);
   const { results } = await listStmt.all();
@@ -304,9 +316,9 @@ async function handleCreate(request, env) {
 
   try {
     await env.DB.prepare(
-      "INSERT INTO notes (id, title, content, date, updated_at, tags, image_keys) VALUES (?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO notes (id, title, content, date, updated_at, tags, image_keys, pinned) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
     )
-      .bind(id, title, body.content, now, now, tagsToDb(tags), JSON.stringify(imageKeys))
+      .bind(id, title, body.content, now, now, tagsToDb(tags), JSON.stringify(imageKeys), typeof body.pinned === "boolean" ? (body.pinned ? 1 : 0) : 0)
       .run();
   } catch (err) {
     // D1書き込みに失敗した場合、先にアップロードした画像が孤立するのを避けて削除する
@@ -326,8 +338,8 @@ async function handleUpdate(request, env, id) {
     return jsonResponse({ error: "invalid_json" }, 400, env);
   }
 
-  if (!body || typeof body.content !== "string") {
-    return jsonResponse({ error: "content_required" }, 400, env);
+  if (!body || (typeof body.content !== "string" && typeof body.pinned !== "boolean")) {
+    return jsonResponse({ error: "content_or_pinned_required" }, 400, env);
   }
 
   const existing = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
@@ -335,7 +347,18 @@ async function handleUpdate(request, env, id) {
     return jsonResponse({ error: "not_found" }, 404, env);
   }
 
+  if (typeof body.content !== "string") {
+    const updatedAt = new Date().toISOString();
+    await env.DB.prepare("UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?")
+      .bind(body.pinned ? 1 : 0, updatedAt, id)
+      .run();
+
+    const row = await env.DB.prepare("SELECT * FROM notes WHERE id = ?").bind(id).first();
+    return jsonResponse(rowToDetail(row), 200, env);
+  }
+
   const { title, tags } = normalizeTitleAndTags(body.title, body.tags);
+  const pinned = typeof body.pinned === "boolean" ? (body.pinned ? 1 : 0) : Number(existing.pinned || 0);
   let imageKeys = JSON.parse(existing.image_keys || "[]");
 
   const removeKeys = Array.isArray(body.removeImageKeys) ? body.removeImageKeys : [];
@@ -358,9 +381,9 @@ async function handleUpdate(request, env, id) {
 
   try {
     await env.DB.prepare(
-      "UPDATE notes SET title = ?, content = ?, tags = ?, image_keys = ?, updated_at = ? WHERE id = ?"
+      "UPDATE notes SET title = ?, content = ?, tags = ?, image_keys = ?, pinned = ?, updated_at = ? WHERE id = ?"
     )
-      .bind(title, body.content, tagsToDb(tags), JSON.stringify(imageKeys), updatedAt, id)
+      .bind(title, body.content, tagsToDb(tags), JSON.stringify(imageKeys), pinned, updatedAt, id)
       .run();
   } catch (err) {
     // 新規追加分の画像だけはロールバック可能。削除済み画像の復元はできないため、
@@ -457,6 +480,9 @@ export default {
         return await handleCreate(request, env);
       }
       if (request.method === "PUT" && id) {
+        return await handleUpdate(request, env, id);
+      }
+      if (request.method === "PATCH" && id) {
         return await handleUpdate(request, env, id);
       }
       if (request.method === "DELETE" && id) {

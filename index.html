@@ -29,6 +29,12 @@
       placeholder="タイトル・本文・タグで検索"
       aria-label="メモを検索"
     >
+    <select id="sort-select" class="toolbar__sort" aria-label="並び順を選択">
+      <option value="pinned">固定を先頭</option>
+      <option value="updated">更新順</option>
+      <option value="created">作成順</option>
+      <option value="title">タイトル順</option>
+    </select>
     <button
       id="new-note-button"
       class="toolbar__new-button"

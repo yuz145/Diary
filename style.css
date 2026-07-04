@@ -118,6 +118,7 @@ input {
   gap: var(--space-2);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border);
+  align-items: center;
 }
 
 .toolbar__search {
@@ -134,8 +135,18 @@ input {
   color: var(--text-muted);
 }
 
+.toolbar__sort {
+  min-width: 112px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-muted);
+}
+
 .toolbar__search:disabled,
-.toolbar__new-button:disabled {
+.toolbar__new-button:disabled,
+.toolbar__sort:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -349,6 +360,7 @@ input {
   display: flex;
   gap: var(--space-2);
   margin-bottom: var(--space-4);
+  flex-wrap: wrap;
 }
 
 .note-view__action-button {
@@ -531,6 +543,16 @@ input {
 }
 
 @media (max-width: 767px) {
+  .toolbar {
+    flex-wrap: wrap;
+  }
+
+  .toolbar__sort {
+    width: 100%;
+    min-width: 0;
+    order: 3;
+  }
+
   .note-form__toolbar {
     gap: 6px;
   }
@@ -566,6 +588,10 @@ input {
 
 .form-feedback[data-tone="success"] {
   color: var(--accent);
+}
+
+.form-feedback[data-tone="info"] {
+  color: var(--text-muted);
 }
 
 /* ---- tag filter chips ---- */
