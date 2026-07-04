@@ -217,6 +217,133 @@ function renderTagFilter() {
 function renderList() {
   el.list.replaceChildren();
 
+
+function parseInlineMarkdown(text) {
+  const fragment = document.createDocumentFragment();
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      fragment.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+    }
+
+    const token = match[0];
+    if (token.startsWith("**")) {
+      const strong = document.createElement("strong");
+      strong.textContent = token.slice(2, -2);
+      fragment.appendChild(strong);
+    } else if (token.startsWith("`")) {
+      const code = document.createElement("code");
+      code.textContent = token.slice(1, -1);
+      fragment.appendChild(code);
+    } else {
+      fragment.appendChild(document.createTextNode(token));
+    }
+
+    lastIndex = pattern.lastIndex;
+  }
+
+  if (lastIndex < text.length) {
+    fragment.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+
+  return fragment;
+}
+
+function isMarkdownHeading(line) {
+  return /^\s{0,3}#{1,6}\s+/.test(line);
+}
+
+function isMarkdownUnorderedListItem(line) {
+  return /^\s{0,3}[-*+]\s+/.test(line);
+}
+
+function isMarkdownOrderedListItem(line) {
+  return /^\s{0,3}\d+\.\s+/.test(line);
+}
+
+function createParagraph(lines) {
+  const paragraph = document.createElement("p");
+
+  lines.forEach((line, index) => {
+    if (index > 0) {
+      paragraph.appendChild(document.createElement("br"));
+    }
+    paragraph.appendChild(parseInlineMarkdown(line.trimEnd()));
+  });
+
+  return paragraph;
+}
+
+function renderMarkdownContent(container, markdownText) {
+  const text = typeof markdownText === "string" ? markdownText : "";
+  const lines = text.split(/\r?\n/);
+  const fragment = document.createDocumentFragment();
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const headingMatch = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const headingLevel = headingMatch[1].length;
+      const heading = document.createElement(`h${headingLevel}`);
+      heading.appendChild(parseInlineMarkdown(headingMatch[2].trim()));
+      fragment.appendChild(heading);
+      index += 1;
+      continue;
+    }
+
+    if (isMarkdownUnorderedListItem(line)) {
+      const list = document.createElement("ul");
+      while (index < lines.length && isMarkdownUnorderedListItem(lines[index])) {
+        const item = document.createElement("li");
+        item.appendChild(parseInlineMarkdown(lines[index].replace(/^\s{0,3}[-*+]\s+/, "").trimEnd()));
+        list.appendChild(item);
+        index += 1;
+      }
+      fragment.appendChild(list);
+      continue;
+    }
+
+    if (isMarkdownOrderedListItem(line)) {
+      const list = document.createElement("ol");
+      while (index < lines.length && isMarkdownOrderedListItem(lines[index])) {
+        const item = document.createElement("li");
+        item.appendChild(parseInlineMarkdown(lines[index].replace(/^\s{0,3}\d+\.\s+/, "").trimEnd()));
+        list.appendChild(item);
+        index += 1;
+      }
+      fragment.appendChild(list);
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !isMarkdownHeading(lines[index]) &&
+      !isMarkdownUnorderedListItem(lines[index]) &&
+      !isMarkdownOrderedListItem(lines[index])
+    ) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+
+    if (paragraphLines.length > 0) {
+      fragment.appendChild(createParagraph(paragraphLines));
+    }
+  }
+
+  container.replaceChildren(fragment);
+}
   if (state.items.length === 0) {
     if (state.query.trim() || state.activeTag) {
       showListStatus("該当するメモが見つかりません。");
@@ -333,7 +460,7 @@ function renderEntry(entry) {
 
   const content = document.createElement("div");
   content.className = "note-view__content";
-  content.textContent = entry.content || "";
+  renderMarkdownContent(content, entry.content || "");
 
   el.view.appendChild(actions);
   el.view.appendChild(title);
