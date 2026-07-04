@@ -1,0 +1,14 @@
+name = "notes-api"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+[[r2_buckets]]
+binding = "oyuzen"
+bucket_name = "oyuzen"
+
+# 許可するフロントのオリジン。Pages側のドメインに合わせて変更する。
+[vars]
+ALLOWED_ORIGIN = "https://oyuzen.pages.dev"
+
+# 合言葉トークンは secret として登録する(このファイルには書かない):
+#   wrangler secret put AUTH_TOKEN

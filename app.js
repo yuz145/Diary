@@ -2,40 +2,22 @@
 
 /* ==========================================================================
    notes — app.js
-   Phase 1: Cloudflare R2 から index.json / entries/*.json を読むだけの
-   最小構成。将来 Workers API に差し替える前提で fetch先はここに集約する。
+   Phase 2: R2への読み書きは全て Cloudflare Workers 経由。
+   フロントから直接R2へPUTすることはない。
    ========================================================================== */
 
-// 今は R2 を直接読む。将来はここを '/api/notes' 系に置き換える。
+// Workers デプロイ後に発行されるURLに置き換える
 const CONFIG = {
   indexUrl: "https://<R2_PUBLIC_BASE>/notes/index.json",
-  entryBaseUrl: "https://<R2_PUBLIC_BASE>/notes/entries/",
+  entryBaseUrl: "https://notes-api.<subdomain>.workers.dev/api/notes/",
 };
 
 // アプリの状態はここだけで持つ（localStorageは使わない）
 const state = {
   items: [],
   selectedId: null,
+  authToken: null, // メモリ上のみ。リロードで消えてよい。
 };
-
-// fetch失敗時にUI確認したい場合はここのコメントを外す
-// const FALLBACK_INDEX_SAMPLE = [
-//   {
-//     id: "2026-07-04-001",
-//     title: "買い物メモ",
-//     date: "2026-07-04T13:30:00+09:00",
-//     summary: "牛乳とSDカード",
-//     tags: ["daily", "memo"],
-//   },
-// ];
-// const FALLBACK_ENTRY_SAMPLE = {
-//   id: "2026-07-04-001",
-//   title: "買い物メモ",
-//   date: "2026-07-04T13:30:00+09:00",
-//   tags: ["daily", "memo"],
-//   content: "牛乳\nSDカード\n電池",
-//   format: "plain",
-// };
 
 /* ---- DOM references ---- */
 
@@ -45,24 +27,80 @@ const el = {
   view: document.getElementById("note-view"),
   viewStatus: document.getElementById("note-view-status"),
   themeToggle: document.getElementById("theme-toggle"),
+  newNoteButton: document.getElementById("new-note-button"),
 };
+
+/* ---- 認証 ---- */
+
+function ensureAuthToken() {
+  if (state.authToken) return state.authToken;
+  const input = window.prompt("合言葉(トークン)を入力してください");
+  if (!input) return null;
+  state.authToken = input;
+  return state.authToken;
+}
+
+function forgetAuthToken() {
+  state.authToken = null;
+}
+
+async function authorizedFetch(url, options) {
+  const token = ensureAuthToken();
+  if (!token) {
+    throw new Error("auth_cancelled");
+  }
+  const response = await fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      "X-Auth-Token": token,
+    },
+  });
+  if (response.status === 401) {
+    // トークンが違う場合は覚えているものを捨てて次回また入力させる
+    forgetAuthToken();
+  }
+  return response;
+}
 
 /* ---- data access layer ---- */
 
 async function fetchIndex() {
   const response = await fetch(CONFIG.indexUrl);
   if (!response.ok) {
-    throw new Error(`index.json の取得に失敗しました (status: ${response.status})`);
+    throw new Error(`index の取得に失敗しました (status: ${response.status})`);
   }
   return response.json();
 }
 
 async function fetchEntry(id) {
-  const response = await fetch(`${CONFIG.entryBaseUrl}${id}.json`);
+  const response = await fetch(`${CONFIG.entryBaseUrl}${id}`);
   if (!response.ok) {
     throw new Error(`本文(${id})の取得に失敗しました (status: ${response.status})`);
   }
   return response.json();
+}
+
+async function createEntry(data) {
+  return authorizedFetch(CONFIG.indexUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+async function updateEntry(id, data) {
+  return authorizedFetch(`${CONFIG.entryBaseUrl}${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+async function removeEntry(id) {
+  return authorizedFetch(`${CONFIG.entryBaseUrl}${id}`, {
+    method: "DELETE",
+  });
 }
 
 /* ---- formatting helpers ---- */
@@ -84,7 +122,18 @@ function sortByDateDesc(items) {
   return [...items].sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
-/* ---- status messages ---- */
+function tagsToText(tags) {
+  return Array.isArray(tags) ? tags.join(", ") : "";
+}
+
+function textToTags(text) {
+  return text
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/* ---- status messages (一覧側) ---- */
 
 function showListStatus(message, tone) {
   el.listStatus.textContent = message;
@@ -99,6 +148,8 @@ function showListStatus(message, tone) {
 function hideListStatus() {
   el.listStatus.hidden = true;
 }
+
+/* ---- status messages (本文側) ---- */
 
 function showViewStatus(message, tone) {
   el.view.replaceChildren();
@@ -115,13 +166,13 @@ function hideViewStatus() {
   el.viewStatus.hidden = true;
 }
 
-/* ---- rendering ---- */
+/* ---- rendering: 一覧 ---- */
 
 function renderList(items) {
   el.list.replaceChildren();
 
   if (items.length === 0) {
-    showListStatus("メモがまだありません。");
+    showListStatus("メモがまだありません。「+ 新規」から作成できます。");
     return;
   }
   hideListStatus();
@@ -174,9 +225,29 @@ function renderList(items) {
   }
 }
 
+/* ---- rendering: 本文(閲覧) ---- */
+
 function renderEntry(entry) {
   hideViewStatus();
   el.view.replaceChildren();
+
+  const actions = document.createElement("div");
+  actions.className = "note-view__actions";
+
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.className = "note-view__action-button";
+  editButton.textContent = "編集";
+  editButton.addEventListener("click", () => showEditForm(entry));
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "note-view__action-button note-view__action-button--danger";
+  deleteButton.textContent = "削除";
+  deleteButton.addEventListener("click", () => handleDeleteClick(entry.id));
+
+  actions.appendChild(editButton);
+  actions.appendChild(deleteButton);
 
   const title = document.createElement("h2");
   title.className = "note-view__title";
@@ -204,15 +275,107 @@ function renderEntry(entry) {
 
   const content = document.createElement("div");
   content.className = "note-view__content";
-  // format は将来 "markdown" 等に拡張予定。今は plain のみ想定。
   content.textContent = entry.content || "";
 
+  el.view.appendChild(actions);
   el.view.appendChild(title);
   el.view.appendChild(meta);
   el.view.appendChild(content);
 }
 
-/* ---- interaction ---- */
+/* ---- rendering: フォーム(新規作成 / 編集) ---- */
+
+function renderForm(existingEntry) {
+  hideViewStatus();
+  el.view.replaceChildren();
+
+  const isEdit = Boolean(existingEntry);
+
+  const heading = document.createElement("h2");
+  heading.className = "note-view__title";
+  heading.textContent = isEdit ? "メモを編集" : "新規メモ";
+
+  const form = document.createElement("form");
+  form.className = "note-form";
+
+  const titleLabel = document.createElement("label");
+  titleLabel.className = "note-form__label";
+  titleLabel.textContent = "タイトル";
+  const titleInput = document.createElement("input");
+  titleInput.className = "note-form__input";
+  titleInput.type = "text";
+  titleInput.required = true;
+  titleInput.value = isEdit ? existingEntry.title || "" : "";
+  titleLabel.appendChild(titleInput);
+
+  const contentLabel = document.createElement("label");
+  contentLabel.className = "note-form__label";
+  contentLabel.textContent = "本文";
+  const contentInput = document.createElement("textarea");
+  contentInput.className = "note-form__textarea";
+  contentInput.required = true;
+  contentInput.value = isEdit ? existingEntry.content || "" : "";
+  contentLabel.appendChild(contentInput);
+
+  const tagsLabel = document.createElement("label");
+  tagsLabel.className = "note-form__label";
+  tagsLabel.textContent = "タグ(カンマ区切り、任意)";
+  const tagsInput = document.createElement("input");
+  tagsInput.className = "note-form__input";
+  tagsInput.type = "text";
+  tagsInput.value = isEdit ? tagsToText(existingEntry.tags) : "";
+  tagsLabel.appendChild(tagsInput);
+
+  const feedback = document.createElement("p");
+  feedback.className = "form-feedback";
+
+  const buttons = document.createElement("div");
+  buttons.className = "note-form__buttons";
+
+  const submitButton = document.createElement("button");
+  submitButton.type = "submit";
+  submitButton.className = "note-form__submit";
+  submitButton.textContent = isEdit ? "更新を保存" : "保存";
+
+  const cancelButton = document.createElement("button");
+  cancelButton.type = "button";
+  cancelButton.className = "note-form__cancel";
+  cancelButton.textContent = "キャンセル";
+  cancelButton.addEventListener("click", () => {
+    if (isEdit) {
+      selectEntry(existingEntry.id);
+    } else {
+      showEmptySelectionOrFirst();
+    }
+  });
+
+  buttons.appendChild(submitButton);
+  buttons.appendChild(cancelButton);
+
+  form.appendChild(titleLabel);
+  form.appendChild(contentLabel);
+  form.appendChild(tagsLabel);
+  form.appendChild(feedback);
+  form.appendChild(buttons);
+
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleFormSubmit({
+      isEdit,
+      id: isEdit ? existingEntry.id : null,
+      title: titleInput.value.trim(),
+      content: contentInput.value,
+      tags: textToTags(tagsInput.value),
+      submitButton,
+      feedback,
+    });
+  });
+
+  el.view.appendChild(heading);
+  el.view.appendChild(form);
+}
+
+/* ---- interaction: 一覧選択 ---- */
 
 async function selectEntry(id) {
   state.selectedId = id;
@@ -227,6 +390,111 @@ async function selectEntry(id) {
   }
 }
 
+function showEmptySelectionOrFirst() {
+  if (state.items.length > 0) {
+    selectEntry(state.items[0].id);
+  } else {
+    state.selectedId = null;
+    renderList(state.items);
+    showViewStatus("メモがまだありません。「+ 新規」から作成できます。");
+  }
+}
+
+/* ---- interaction: 新規作成 / 編集フォーム表示 ---- */
+
+function showCreateForm() {
+  renderForm(null);
+}
+
+function showEditForm(entry) {
+  renderForm(entry);
+}
+
+/* ---- interaction: フォーム送信 ---- */
+
+async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton, feedback }) {
+  if (!title || !content) {
+    feedback.textContent = "タイトルと本文を入力してください。";
+    feedback.dataset.tone = "error";
+    return;
+  }
+
+  submitButton.disabled = true;
+  feedback.textContent = "保存中…";
+  delete feedback.dataset.tone;
+
+  try {
+    const response = isEdit
+      ? await updateEntry(id, { title, content, tags })
+      : await createEntry({ title, content, tags });
+
+    if (response.status === 401) {
+      feedback.textContent = "合言葉が正しくありません。もう一度お試しください。";
+      feedback.dataset.tone = "error";
+      submitButton.disabled = false;
+      return;
+    }
+
+    if (!response.ok) {
+      feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
+      feedback.dataset.tone = "error";
+      submitButton.disabled = false;
+      return;
+    }
+
+    const savedEntry = await response.json();
+    feedback.textContent = "保存しました。";
+    feedback.dataset.tone = "success";
+
+    const items = await fetchIndex();
+    state.items = sortByDateDesc(items);
+    state.selectedId = savedEntry.id;
+    renderList(state.items);
+    renderEntry(savedEntry);
+  } catch (err) {
+    if (err && err.message === "auth_cancelled") {
+      feedback.textContent = "合言葉の入力がキャンセルされました。";
+    } else {
+      feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
+    }
+    feedback.dataset.tone = "error";
+    submitButton.disabled = false;
+  }
+}
+
+/* ---- interaction: 削除 ---- */
+
+async function handleDeleteClick(id) {
+  const confirmed = window.confirm("このメモを削除しますか？この操作は取り消せません。");
+  if (!confirmed) return;
+
+  showViewStatus("削除中…");
+  try {
+    const response = await removeEntry(id);
+
+    if (response.status === 401) {
+      showViewStatus("合言葉が正しくありません。もう一度お試しください。", "error");
+      return;
+    }
+    if (!response.ok && response.status !== 204) {
+      showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
+      return;
+    }
+
+    const items = await fetchIndex();
+    state.items = sortByDateDesc(items);
+    showEmptySelectionOrFirst();
+  } catch (err) {
+    if (err && err.message === "auth_cancelled") {
+      showViewStatus("合言葉の入力がキャンセルされました。", "error");
+    } else {
+      showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
+    }
+  }
+}
+
+/* ---- theme ---- */
+
 function toggleTheme() {
   const current = document.body.dataset.theme === "dark" ? "dark" : "light";
   document.body.dataset.theme = current === "dark" ? "light" : "dark";
@@ -236,6 +504,7 @@ function toggleTheme() {
 
 async function init() {
   el.themeToggle.addEventListener("click", toggleTheme);
+  el.newNoteButton.addEventListener("click", showCreateForm);
 
   showListStatus("読み込み中…");
   showViewStatus("メモを選択してください。");
@@ -246,7 +515,7 @@ async function init() {
 
     if (state.items.length === 0) {
       renderList(state.items);
-      showViewStatus("メモがまだありません。");
+      showViewStatus("メモがまだありません。「+ 新規」から作成できます。");
       return;
     }
 
