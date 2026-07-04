@@ -7,11 +7,28 @@
    アクセス制御は Cloudflare Access が行うため、アプリ側に認証ロジックは持たない。
    ========================================================================== */
 
-// Workers デプロイ後に発行されるURLに置き換える
-const CONFIG = {
-  indexUrl: "https://<R2_PUBLIC_BASE>/notes/index.json",
-  entryBaseUrl: "https://notes-api.<subdomain>.workers.dev/api/notes/",
-};
+// CONFIG は config.js で定義される(このファイルでは触らない)
+
+// CONFIGが未設定のまま(プレースホルダのまま)だと、fetch()に渡すURLとして不正な
+// 文字("<" ">")を含むため、fetch()はネットワークリクエストを送る前に
+// 同期的にTypeErrorを投げる。その結果 Network タブに何も出ず、catchブロックで
+// ログを取っていないと原因が全く見えなくなる。起動時に必ず気付けるようにする。
+function assertConfigIsSet() {
+  const placeholderPattern = /<.*>/;
+  const problems = [];
+  if (placeholderPattern.test(CONFIG.indexUrl)) {
+    problems.push(`CONFIG.indexUrl がプレースホルダのままです: ${CONFIG.indexUrl}`);
+  }
+  if (placeholderPattern.test(CONFIG.entryBaseUrl)) {
+    problems.push(`CONFIG.entryBaseUrl がプレースホルダのままです: ${CONFIG.entryBaseUrl}`);
+  }
+  if (problems.length > 0) {
+    const message = problems.join(" / ");
+    console.error(`[notes] CONFIG設定エラー: ${message}`);
+    return message;
+  }
+  return null;
+}
 
 // アプリの状態はここだけで持つ（localStorageは使わない）
 const state = {
@@ -98,6 +115,18 @@ function textToTags(text) {
     .split(",")
     .map((t) => t.trim())
     .filter((t) => t.length > 0);
+}
+
+/* ---- error diagnostics ---- */
+
+async function describeFailedResponse(response) {
+  let bodyText = "";
+  try {
+    bodyText = await response.text();
+  } catch (err) {
+    bodyText = "(レスポンス本文を読み取れませんでした)";
+  }
+  return `status: ${response.status}, body: ${bodyText.slice(0, 500)}`;
 }
 
 /* ---- status messages (一覧側) ---- */
@@ -353,6 +382,7 @@ async function selectEntry(id) {
     const entry = await fetchEntry(id);
     renderEntry(entry);
   } catch (err) {
+    console.error("[notes] 本文の読み込みに失敗しました:", err);
     showViewStatus("本文を読み込めませんでした。時間をおいて再度お試しください。", "error");
   }
 }
@@ -386,6 +416,13 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
     return;
   }
 
+  const configProblem = assertConfigIsSet();
+  if (configProblem) {
+    feedback.textContent = `設定エラー: ${configProblem}`;
+    feedback.dataset.tone = "error";
+    return;
+  }
+
   submitButton.disabled = true;
   feedback.textContent = "保存中…";
   delete feedback.dataset.tone;
@@ -396,7 +433,9 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
       : await createEntry({ title, content, tags });
 
     if (!response.ok) {
-      feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
+      const detail = await describeFailedResponse(response);
+      console.error(`[notes] 保存失敗 (${isEdit ? "PUT" : "POST"}): ${detail}`);
+      feedback.textContent = `保存に失敗しました (${detail})`;
       feedback.dataset.tone = "error";
       submitButton.disabled = false;
       return;
@@ -412,7 +451,8 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
     renderList(state.items);
     renderEntry(savedEntry);
   } catch (err) {
-    feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
+    console.error("[notes] 保存中に例外が発生しました:", err);
+    feedback.textContent = `保存に失敗しました (${err && err.message ? err.message : "不明なエラー"})`;
     feedback.dataset.tone = "error";
     submitButton.disabled = false;
   }
@@ -429,7 +469,9 @@ async function handleDeleteClick(id) {
     const response = await removeEntry(id);
 
     if (!response.ok && response.status !== 204) {
-      showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
+      const detail = await describeFailedResponse(response);
+      console.error(`[notes] 削除失敗 (DELETE): ${detail}`);
+      showViewStatus(`削除に失敗しました (${detail})`, "error");
       return;
     }
 
@@ -437,7 +479,11 @@ async function handleDeleteClick(id) {
     state.items = sortByDateDesc(items);
     showEmptySelectionOrFirst();
   } catch (err) {
-    showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
+    console.error("[notes] 削除中に例外が発生しました:", err);
+    showViewStatus(
+      `削除に失敗しました (${err && err.message ? err.message : "不明なエラー"})`,
+      "error"
+    );
   }
 }
 
@@ -453,6 +499,13 @@ function toggleTheme() {
 async function init() {
   el.themeToggle.addEventListener("click", toggleTheme);
   el.newNoteButton.addEventListener("click", showCreateForm);
+
+  const configProblem = assertConfigIsSet();
+  if (configProblem) {
+    showListStatus(`設定エラー: ${configProblem}`, "error");
+    showViewStatus("メモを選択してください。");
+    return;
+  }
 
   showListStatus("読み込み中…");
   showViewStatus("メモを選択してください。");
@@ -470,6 +523,7 @@ async function init() {
     renderList(state.items);
     await selectEntry(state.items[0].id);
   } catch (err) {
+    console.error("[notes] 一覧の読み込みに失敗しました:", err);
     showListStatus("一覧を読み込めませんでした。時間をおいて再度お試しください。", "error");
     showViewStatus("メモを選択してください。");
   }
