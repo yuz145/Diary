@@ -41,6 +41,7 @@ const state = {
   selectedId: null,
   query: "",
   activeTag: null,
+  theme: "light",
   knownTags: new Set(), // タグチップ表示用。読み込んだ範囲から見えたタグを蓄積するだけの簡易実装
 };
 
@@ -62,6 +63,99 @@ const el = {
 
 function isCompactScreen() {
   return window.matchMedia("(max-width: 767px)").matches;
+}
+
+function insertMarkdownInline(textarea, before, after = "") {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const selected = textarea.value.substring(start, end);
+  const nextValue =
+    textarea.value.substring(0, start) + before + selected + after + textarea.value.substring(end);
+
+  textarea.value = nextValue;
+  textarea.focus();
+  textarea.selectionStart = start + before.length;
+  textarea.selectionEnd = start + before.length + selected.length;
+}
+
+function insertMarkdownLinePrefix(textarea, prefix) {
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+  const value = textarea.value;
+  const lineStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const lineEndIndex = value.indexOf("\n", end);
+  const lineEnd = lineEndIndex === -1 ? value.length : lineEndIndex;
+  const block = value.slice(lineStart, lineEnd);
+  const nextBlock = block
+    .split("\n")
+    .map((line) => `${prefix}${line}`)
+    .join("\n");
+
+  textarea.value = value.slice(0, lineStart) + nextBlock + value.slice(lineEnd);
+  textarea.focus();
+  textarea.selectionStart = lineStart;
+  textarea.selectionEnd = lineStart + nextBlock.length;
+}
+
+function syncScrollByRatio(from, to) {
+  const fromRange = from.scrollHeight - from.clientHeight;
+  const toRange = to.scrollHeight - to.clientHeight;
+  if (fromRange <= 0 || toRange <= 0) {
+    to.scrollTop = 0;
+    return;
+  }
+
+  const ratio = from.scrollTop / fromRange;
+  to.scrollTop = ratio * toRange;
+}
+
+function getThemeSettingsUrl() {
+  const url = new URL(CONFIG.indexUrl);
+  url.pathname = "/api/settings/theme";
+  url.search = "";
+  return url.toString();
+}
+
+function normalizeThemeValue(value) {
+  return value === "dark" ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  state.theme = normalizeThemeValue(theme);
+  document.documentElement.dataset.theme = state.theme;
+  el.themeToggle.setAttribute("aria-pressed", state.theme === "dark" ? "true" : "false");
+  el.themeToggle.title = state.theme === "dark" ? "ライトテーマに切り替える" : "ダークテーマに切り替える";
+}
+
+async function fetchThemeSetting() {
+  const response = await fetch(getThemeSettingsUrl());
+  if (!response.ok) {
+    throw new Error(`テーマ取得に失敗しました (status: ${response.status})`);
+  }
+  const data = await response.json();
+  return typeof data?.value === "string" ? data.value : "light";
+}
+
+async function saveThemeSetting(theme) {
+  const response = await fetch(getThemeSettingsUrl(), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ value: theme }),
+  });
+  if (!response.ok) {
+    throw new Error(`テーマ保存に失敗しました (status: ${response.status})`);
+  }
+  return response.json();
+}
+
+async function loadThemeSetting() {
+  try {
+    const theme = normalizeThemeValue(await fetchThemeSetting());
+    applyTheme(theme);
+  } catch (err) {
+    console.error("[notes] テーマの読み込みに失敗しました:", err);
+    applyTheme(document.documentElement.dataset.theme || "light");
+  }
 }
 
 /* ---- data access layer ---- */
@@ -505,6 +599,37 @@ function renderForm(existingEntry) {
   contentInput.value = isEdit ? existingEntry.content || "" : "";
   contentLabel.appendChild(contentInput);
 
+  const editorToolbar = document.createElement("div");
+  editorToolbar.className = "note-form__toolbar";
+
+  const markdownButtons = [
+    { label: "太字", action: "bold" },
+    { label: "見出し", action: "heading" },
+    { label: "リスト", action: "list" },
+    { label: "引用", action: "quote" },
+  ];
+
+  for (const item of markdownButtons) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "note-form__tool-button";
+    button.textContent = item.label;
+    button.addEventListener("click", () => {
+      if (item.action === "bold") {
+        insertMarkdownInline(contentInput, "**", "**");
+      } else if (item.action === "heading") {
+        insertMarkdownLinePrefix(contentInput, "# ");
+      } else if (item.action === "list") {
+        insertMarkdownLinePrefix(contentInput, "- ");
+      } else if (item.action === "quote") {
+        insertMarkdownLinePrefix(contentInput, "> ");
+      }
+      updatePreview();
+      syncScrollByRatio(contentInput, previewBody);
+    });
+    editorToolbar.appendChild(button);
+  }
+
   const tagsLabel = document.createElement("label");
   tagsLabel.className = "note-form__label";
   tagsLabel.textContent = "タグ(カンマ区切り、任意)";
@@ -546,11 +671,29 @@ function renderForm(existingEntry) {
   const previewBody = document.createElement("div");
   previewBody.className = "note-form__preview-body";
 
+  let isSyncingScroll = false;
+
   const updatePreview = () => {
     renderMarkdownContent(previewBody, contentInput.value);
   };
 
+  const syncPreviewFromEditor = () => {
+    if (isSyncingScroll) return;
+    isSyncingScroll = true;
+    syncScrollByRatio(contentInput, previewBody);
+    isSyncingScroll = false;
+  };
+
+  const syncEditorFromPreview = () => {
+    if (isSyncingScroll) return;
+    isSyncingScroll = true;
+    syncScrollByRatio(previewBody, contentInput);
+    isSyncingScroll = false;
+  };
+
   contentInput.addEventListener("input", updatePreview);
+  contentInput.addEventListener("scroll", syncPreviewFromEditor, { passive: true });
+  previewBody.addEventListener("scroll", syncEditorFromPreview, { passive: true });
   updatePreview();
 
   previewDetails.appendChild(previewSummary);
@@ -580,6 +723,7 @@ function renderForm(existingEntry) {
   buttons.appendChild(cancelButton);
 
   form.appendChild(titleLabel);
+  form.appendChild(editorToolbar);
   form.appendChild(contentLabel);
   form.appendChild(tagsLabel);
   form.appendChild(tagsHint);
@@ -765,15 +909,31 @@ async function handleDeleteClick(id) {
 
 /* ---- theme ---- */
 
-function toggleTheme() {
-  const current = document.body.dataset.theme === "dark" ? "dark" : "light";
-  document.body.dataset.theme = current === "dark" ? "light" : "dark";
+async function toggleTheme() {
+  const nextTheme = state.theme === "dark" ? "light" : "dark";
+  const previousTheme = state.theme;
+
+  applyTheme(nextTheme);
+  el.themeToggle.disabled = true;
+
+  try {
+    await saveThemeSetting(nextTheme);
+  } catch (err) {
+    console.error("[notes] テーマの保存に失敗しました:", err);
+    applyTheme(previousTheme);
+  } finally {
+    el.themeToggle.disabled = false;
+  }
 }
 
 /* ---- boot ---- */
 
 async function init() {
-  el.themeToggle.addEventListener("click", toggleTheme);
+  await loadThemeSetting();
+
+  el.themeToggle.addEventListener("click", () => {
+    void toggleTheme();
+  });
   el.newNoteButton.addEventListener("click", showCreateForm);
   el.searchInput.addEventListener("input", handleSearchInput);
   el.loadMoreButton.addEventListener("click", handleLoadMore);

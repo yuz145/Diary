@@ -4,13 +4,20 @@
    ========================================================================== */
 
 :root {
-  --bg: #faf9f6;
-  --surface: #ffffff;
-  --text: #1f1d1a;
-  --text-muted: #7a756d;
-  --border: #e7e3da;
-  --accent: #4a5d4e;
-  --accent-soft: #e7ede8;
+  --bg-color: #faf9f6;
+  --surface-color: #ffffff;
+  --text-color: #1f1d1a;
+  --text-muted-color: #7a756d;
+  --border-color: #e7e3da;
+  --accent-color: #4a5d4e;
+  --accent-soft-color: #e7ede8;
+  --bg: var(--bg-color);
+  --surface: var(--surface-color);
+  --text: var(--text-color);
+  --text-muted: var(--text-muted-color);
+  --border: var(--border-color);
+  --accent: var(--accent-color);
+  --accent-soft: var(--accent-soft-color);
   --radius: 6px;
 
   --font-ui: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
@@ -24,14 +31,19 @@
   --space-6: 32px;
 }
 
-[data-theme="dark"] {
-  --bg: #1b1b18;
-  --surface: #232320;
-  --text: #edebe6;
-  --text-muted: #9a948a;
-  --border: #34322c;
-  --accent: #8fb093;
-  --accent-soft: #2a332b;
+html[data-theme="light"] {
+  color-scheme: light;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-color: #1b1b18;
+  --surface-color: #232320;
+  --text-color: #edebe6;
+  --text-muted-color: #9a948a;
+  --border-color: #34322c;
+  --accent-color: #8fb093;
+  --accent-soft-color: #2a332b;
 }
 
 * {
@@ -39,13 +51,13 @@
 }
 
 html {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--bg-color);
+  color: var(--text-color);
   font-family: var(--font-ui);
   font-size: 16px;
   line-height: 1.6;
@@ -399,6 +411,28 @@ input {
   line-height: 1.7;
 }
 
+.note-form__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: calc(var(--space-1) * -1) 0 0;
+}
+
+.note-form__tool-button {
+  padding: 3px var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.note-form__tool-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .note-form__preview {
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -497,6 +531,15 @@ input {
 }
 
 @media (max-width: 767px) {
+  .note-form__toolbar {
+    gap: 6px;
+  }
+
+  .note-form__tool-button {
+    padding: 2px 8px;
+    font-size: 11px;
+  }
+
   .note-form__preview-body {
     max-height: 120px;
   }

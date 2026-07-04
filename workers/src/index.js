@@ -16,6 +16,7 @@
 const UNTITLED_TAG = "タイトル未設定";
 const MAX_LIMIT = 100;
 const DEFAULT_LIMIT = 20;
+const DEFAULT_THEME = "light";
 
 /* ---------------------------------------------------------------------- */
 /* CORS                                                                    */
@@ -41,6 +42,13 @@ function jsonResponse(data, status, env) {
 
 function emptyResponse(status, env) {
   return new Response(null, { status, headers: corsHeaders(env) });
+}
+
+function getThemeValueUrl(url) {
+  const themeUrl = new URL(url.toString());
+  themeUrl.pathname = "/api/settings/theme";
+  themeUrl.search = "";
+  return themeUrl;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -97,6 +105,49 @@ function rowToDetail(row) {
     format: "plain",
     imageKeys: JSON.parse(row.image_keys || "[]"),
   };
+}
+
+async function getSettingValue(env, key) {
+  const row = await env.DB.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first();
+  return row ? row.value : null;
+}
+
+async function setSettingValue(env, key, value) {
+  await env.DB.prepare(
+    "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  )
+    .bind(key, value)
+    .run();
+}
+
+async function handleGetTheme(env) {
+  const storedValue = await getSettingValue(env, "theme");
+  const value = storedValue || DEFAULT_THEME;
+  return jsonResponse({ key: "theme", value }, 200, env);
+}
+
+async function handlePutTheme(request, env) {
+  let value = null;
+
+  const contentType = request.headers.get("Content-Type") || "";
+  if (contentType.includes("application/json")) {
+    let body;
+    try {
+      body = await request.json();
+    } catch (err) {
+      return jsonResponse({ error: "invalid_json" }, 400, env);
+    }
+    value = typeof body?.value === "string" ? body.value.trim() : null;
+  } else {
+    value = (await request.text()).trim();
+  }
+
+  if (!value) {
+    return jsonResponse({ error: "value_required" }, 400, env);
+  }
+
+  await setSettingValue(env, "theme", value);
+  return jsonResponse({ key: "theme", value }, 200, env);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -361,6 +412,20 @@ export default {
     }
 
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/settings/theme") {
+      try {
+        if (request.method === "GET") {
+          return await handleGetTheme(env);
+        }
+        if (request.method === "PUT") {
+          return await handlePutTheme(request, env);
+        }
+      } catch (err) {
+        return jsonResponse({ error: "internal_error" }, 500, env);
+      }
+      return jsonResponse({ error: "method_not_allowed" }, 405, env);
+    }
 
     if (url.pathname.startsWith("/api/images/")) {
       if (request.method !== "GET") {
