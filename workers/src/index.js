@@ -2,13 +2,14 @@
  * notes-api (Cloudflare Workers)
  *
  * R2への書き込みはここ経由のみに限定する。フロントから直接PUTはさせない。
+ * アクセス制御はCloudflare Access側で行うため、ここには認証ロジックを持たせない。
  *
  * Endpoints:
  *   GET    /api/notes        -> index.json を返す
  *   GET    /api/notes/:id    -> entries/:id.json を返す
- *   POST   /api/notes        -> 新規作成 (auth必須)
- *   PUT    /api/notes/:id    -> 更新       (auth必須)
- *   DELETE /api/notes/:id    -> 削除       (auth必須)
+ *   POST   /api/notes        -> 新規作成
+ *   PUT    /api/notes/:id    -> 更新
+ *   DELETE /api/notes/:id    -> 削除
  */
 
 const INDEX_KEY = "notes/index.json";
@@ -22,7 +23,7 @@ function corsHeaders(env) {
   return {
     "Access-Control-Allow-Origin": env.ALLOWED_ORIGIN || "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,X-Auth-Token",
+    "Access-Control-Allow-Headers": "Content-Type",
   };
 }
 
@@ -38,16 +39,6 @@ function jsonResponse(data, status, env) {
 
 function emptyResponse(status, env) {
   return new Response(null, { status, headers: corsHeaders(env) });
-}
-
-/* ---------------------------------------------------------------------- */
-/* 認証 (合言葉方式) — 将来 JWT 等に強化する場合はこの関数だけ差し替える   */
-/* ---------------------------------------------------------------------- */
-
-function isAuthorized(request, env) {
-  const token = request.headers.get("X-Auth-Token");
-  if (!token || !env.AUTH_TOKEN) return false;
-  return token === env.AUTH_TOKEN;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -268,11 +259,6 @@ export default {
     }
 
     const id = parts[2];
-
-    // 参照系(GET)は認証不要、更新系は認証必須
-    if (request.method !== "GET" && !isAuthorized(request, env)) {
-      return jsonResponse({ error: "unauthorized" }, 401, env);
-    }
 
     try {
       if (request.method === "GET" && !id) {

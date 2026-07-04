@@ -4,19 +4,19 @@
    notes — app.js
    Phase 2: R2への読み書きは全て Cloudflare Workers 経由。
    フロントから直接R2へPUTすることはない。
+   アクセス制御は Cloudflare Access が行うため、アプリ側に認証ロジックは持たない。
    ========================================================================== */
 
 // Workers デプロイ後に発行されるURLに置き換える
 const CONFIG = {
-  indexUrl: "https://pub-e5e3bb4f567c42cabe57034c606e7b3b.r2.dev",
-  entryBaseUrl: "https://<R2_PUBLIC_BASE>/notes/entries/",
+  indexUrl: "https://<R2_PUBLIC_BASE>/notes/index.json",
+  entryBaseUrl: "https://notes-api.<subdomain>.workers.dev/api/notes/",
 };
 
 // アプリの状態はここだけで持つ（localStorageは使わない）
 const state = {
   items: [],
   selectedId: null,
-  authToken: null, // メモリ上のみ。リロードで消えてよい。
 };
 
 /* ---- DOM references ---- */
@@ -29,39 +29,6 @@ const el = {
   themeToggle: document.getElementById("theme-toggle"),
   newNoteButton: document.getElementById("new-note-button"),
 };
-
-/* ---- 認証 ---- */
-
-function ensureAuthToken() {
-  if (state.authToken) return state.authToken;
-  const input = window.prompt("合言葉(トークン)を入力してください");
-  if (!input) return null;
-  state.authToken = input;
-  return state.authToken;
-}
-
-function forgetAuthToken() {
-  state.authToken = null;
-}
-
-async function authorizedFetch(url, options) {
-  const token = ensureAuthToken();
-  if (!token) {
-    throw new Error("auth_cancelled");
-  }
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...(options.headers || {}),
-      "X-Auth-Token": token,
-    },
-  });
-  if (response.status === 401) {
-    // トークンが違う場合は覚えているものを捨てて次回また入力させる
-    forgetAuthToken();
-  }
-  return response;
-}
 
 /* ---- data access layer ---- */
 
@@ -82,7 +49,7 @@ async function fetchEntry(id) {
 }
 
 async function createEntry(data) {
-  return authorizedFetch(CONFIG.indexUrl, {
+  return fetch(CONFIG.indexUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -90,7 +57,7 @@ async function createEntry(data) {
 }
 
 async function updateEntry(id, data) {
-  return authorizedFetch(`${CONFIG.entryBaseUrl}${id}`, {
+  return fetch(`${CONFIG.entryBaseUrl}${id}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -98,7 +65,7 @@ async function updateEntry(id, data) {
 }
 
 async function removeEntry(id) {
-  return authorizedFetch(`${CONFIG.entryBaseUrl}${id}`, {
+  return fetch(`${CONFIG.entryBaseUrl}${id}`, {
     method: "DELETE",
   });
 }
@@ -428,13 +395,6 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
       ? await updateEntry(id, { title, content, tags })
       : await createEntry({ title, content, tags });
 
-    if (response.status === 401) {
-      feedback.textContent = "合言葉が正しくありません。もう一度お試しください。";
-      feedback.dataset.tone = "error";
-      submitButton.disabled = false;
-      return;
-    }
-
     if (!response.ok) {
       feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
       feedback.dataset.tone = "error";
@@ -452,11 +412,7 @@ async function handleFormSubmit({ isEdit, id, title, content, tags, submitButton
     renderList(state.items);
     renderEntry(savedEntry);
   } catch (err) {
-    if (err && err.message === "auth_cancelled") {
-      feedback.textContent = "合言葉の入力がキャンセルされました。";
-    } else {
-      feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
-    }
+    feedback.textContent = "保存に失敗しました。時間をおいて再度お試しください。";
     feedback.dataset.tone = "error";
     submitButton.disabled = false;
   }
@@ -472,10 +428,6 @@ async function handleDeleteClick(id) {
   try {
     const response = await removeEntry(id);
 
-    if (response.status === 401) {
-      showViewStatus("合言葉が正しくありません。もう一度お試しください。", "error");
-      return;
-    }
     if (!response.ok && response.status !== 204) {
       showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
       return;
@@ -485,11 +437,7 @@ async function handleDeleteClick(id) {
     state.items = sortByDateDesc(items);
     showEmptySelectionOrFirst();
   } catch (err) {
-    if (err && err.message === "auth_cancelled") {
-      showViewStatus("合言葉の入力がキャンセルされました。", "error");
-    } else {
-      showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
-    }
+    showViewStatus("削除に失敗しました。時間をおいて再度お試しください。", "error");
   }
 }
 
