@@ -7,7 +7,7 @@ compatibility_date = "2026-07-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "oyuzen-notes"
-database_id = ""65e6c9d1-581f-4586-b7c6-11fe371ea190""
+database_id = "65e6c9d1-581f-4586-b7c6-11fe371ea190"
 
 # R2: 画像のみを保存する(index.json方式は廃止)
 [[r2_buckets]]
