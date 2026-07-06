@@ -1,0 +1,152 @@
+Diary System Detailed Description
+================================
+
+1) Overview
+-----------
+Diary is a lightweight memo system composed of:
+- Frontend: static files (`index.html`, `style.css`, `app.js`, `config.js`)
+- Backend API: Cloudflare Workers (`workers/src/index.js`)
+- Data store: Cloudflare D1 (text/meta data)
+- Binary store: Cloudflare R2 (image objects only)
+
+Main user flow:
+- List notes -> Open note detail -> Edit -> Save
+- Search/filter/sort on list
+- Theme preference sync
+
+
+2) Architecture
+---------------
+A. Frontend
+- `index.html`
+  - App shell (header, toolbar, list pane, detail pane)
+  - Search input, sort select, create button, load-more button
+- `style.css`
+  - Light/dark theme tokens
+  - Responsive layout (mobile first, desktop two-column)
+- `app.js`
+  - UI state management (selected note, query, active tag, sort, theme)
+  - Render list/detail/form
+  - Markdown preview rendering
+  - CRUD interactions via fetch
+  - Draft autosave/restore by localStorage
+  - Keyboard shortcuts
+  - Tab / Shift+Tab indentation in editor textarea
+- `config.js`
+  - API endpoint configuration
+
+B. Backend (Workers)
+- REST endpoints for notes, images, and theme settings
+- Server-side logic includes:
+  - title/tag normalization rule
+  - list query (q/tag/sort/limit/offset)
+  - image upload/delete with R2
+  - error-safe write flow
+
+C. Data layer
+- D1 table `notes`
+  - id, title, content, date, updated_at, tags, image_keys, pinned
+- D1 table `settings`
+  - key, value (currently includes theme)
+- R2 bucket
+  - image objects keyed as `images/<note-id>-<index>.<ext>`
+
+
+3) Core Features
+----------------
+- Note CRUD
+- Markdown toolbar (bold/heading/list/quote)
+- Collapsible markdown preview
+- Full text search on title/content
+- Tag filter chips + tag suggestions
+- Pagination with "load more"
+- Pin/unpin notes
+- Sorting:
+  - pinned first
+  - updated
+  - created
+  - title
+- Draft autosave/restore
+- Theme toggle with cloud persistence
+- Keyboard shortcuts
+
+
+4) Form Editing Behavior
+------------------------
+- Content is required
+- Title is optional
+- Tags are comma-separated
+- If title is empty, server auto-adds "タイトル未設定" tag
+- Draft behavior:
+  - autosaves while editing
+  - restores when reopening form
+  - clears draft after successful save
+- Textarea indentation:
+  - Tab: indent selected lines by 2 spaces
+  - Shift+Tab: outdent selected lines
+
+
+5) API Endpoints
+----------------
+- GET    /api/notes?limit=&offset=&q=&tag=&sort=
+  - returns list items + paging metadata
+- GET    /api/notes/:id
+  - returns full note detail
+- POST   /api/notes
+  - creates note
+- PUT    /api/notes/:id
+  - updates note content/title/tags/images (+ optional pinned)
+- PATCH  /api/notes/:id
+  - pin toggle update (pinned only)
+- DELETE /api/notes/:id
+  - deletes note and related images
+- GET    /api/images/:key
+  - fetch image from R2
+- GET    /api/settings/theme
+  - read theme setting
+- PUT    /api/settings/theme
+  - save theme setting
+
+
+6) Sorting and Filtering Semantics
+----------------------------------
+- Search `q`: title/content LIKE matching
+- Tag filter `tag`: comma-delimited tag field match
+- Sort parameter `sort`:
+  - pinned: pinned desc, updated desc, created desc
+  - updated: updated desc
+  - created: created desc
+  - title: title asc (case-insensitive)
+
+
+7) Migrations
+-------------
+- `workers/migrations/0001_init.sql`
+  - creates notes table/index
+- `workers/migrations/0002_settings.sql`
+  - creates settings table and default theme
+- `workers/migrations/0003_pinned_sort.sql`
+  - adds pinned column and pinned/date index
+
+
+8) Security / Access Model
+--------------------------
+- App-level auth logic is intentionally minimal
+- Access control is assumed to be handled by Cloudflare Access
+- CORS origin is configurable via `ALLOWED_ORIGIN`
+
+
+9) Operational Notes
+--------------------
+- This project is pull-based, not realtime-subscribe
+- Frontend list reload/load-more is used for consistency
+- Images are stored separately from D1 for performance and cost reasons
+
+
+10) Future Candidates
+---------------------
+- Trash/restore
+- Version history
+- PWA support
+- Calendar view
+- Tag management screen (rename/merge/count)

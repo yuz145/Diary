@@ -172,6 +172,68 @@ function syncScrollByRatio(from, to) {
   to.scrollTop = ratio * toRange;
 }
 
+function handleTextareaTabIndent(event, textarea) {
+  if (event.key !== "Tab") {
+    return false;
+  }
+
+  event.preventDefault();
+
+  const indent = "  ";
+  const value = textarea.value;
+  const start = textarea.selectionStart;
+  const end = textarea.selectionEnd;
+
+  const lineStart = value.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+  const lineEndIndex = value.indexOf("\n", end);
+  const lineEnd = lineEndIndex === -1 ? value.length : lineEndIndex;
+
+  const before = value.slice(0, lineStart);
+  const block = value.slice(lineStart, lineEnd);
+  const after = value.slice(lineEnd);
+
+  // Shift+Tab は字下げ解除、Tab は字下げ追加。
+  if (event.shiftKey) {
+    const lines = block.split("\n");
+    let removedFromFirstLine = 0;
+    let removedBeforeSelectionEnd = 0;
+
+    const nextLines = lines.map((line, index) => {
+      if (line.startsWith(indent)) {
+        if (index === 0) removedFromFirstLine = indent.length;
+        removedBeforeSelectionEnd += indent.length;
+        return line.slice(indent.length);
+      }
+      if (line.startsWith("\t")) {
+        if (index === 0) removedFromFirstLine = 1;
+        removedBeforeSelectionEnd += 1;
+        return line.slice(1);
+      }
+      return line;
+    });
+
+    const nextBlock = nextLines.join("\n");
+    textarea.value = before + nextBlock + after;
+
+    const nextStart = Math.max(lineStart, start - removedFromFirstLine);
+    const nextEnd = Math.max(nextStart, end - removedBeforeSelectionEnd);
+    textarea.selectionStart = nextStart;
+    textarea.selectionEnd = nextEnd;
+    return true;
+  }
+
+  const lines = block.split("\n");
+  const nextBlock = lines.map((line) => `${indent}${line}`).join("\n");
+  textarea.value = before + nextBlock + after;
+
+  const lineCount = lines.length;
+  const insertedBeforeStart = indent.length;
+  const insertedBeforeEnd = indent.length * lineCount;
+  textarea.selectionStart = start + insertedBeforeStart;
+  textarea.selectionEnd = end + insertedBeforeEnd;
+  return true;
+}
+
 function getThemeSettingsUrl() {
   const url = new URL(CONFIG.indexUrl);
   url.pathname = "/api/settings/theme";
@@ -806,6 +868,13 @@ function renderForm(existingEntry) {
   };
 
   contentInput.addEventListener("input", updatePreview);
+  contentInput.addEventListener("keydown", (event) => {
+    const handled = handleTextareaTabIndent(event, contentInput);
+    if (handled) {
+      updatePreview();
+      syncScrollByRatio(contentInput, previewBody);
+    }
+  });
   titleInput.addEventListener("input", queueDraftSave);
   tagsInput.addEventListener("input", queueDraftSave);
   contentInput.addEventListener("scroll", syncPreviewFromEditor, { passive: true });
@@ -841,10 +910,10 @@ function renderForm(existingEntry) {
   form.appendChild(titleLabel);
   form.appendChild(editorToolbar);
   form.appendChild(contentLabel);
+  form.appendChild(previewDetails);
   form.appendChild(tagsLabel);
   form.appendChild(tagsHint);
   form.appendChild(tagSuggestions);
-  form.appendChild(previewDetails);
   form.appendChild(feedback);
   form.appendChild(buttons);
 
