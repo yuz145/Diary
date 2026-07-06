@@ -11,6 +11,8 @@
  *   PUT    /api/notes/:id                      -> 更新
  *   PATCH  /api/notes/:id                      -> pin切り替え
  *   DELETE /api/notes/:id                      -> 削除
+ *   GET    /api/tags                            -> タグ一覧(使用件数)
+ *   DELETE /api/tags/:tag                       -> タグを全メモから削除
  *   GET    /api/images/:key                    -> R2から画像を返す(遅延読み込み用)
  */
 
@@ -424,6 +426,54 @@ async function handleGetImage(env, key) {
   return new Response(object.body, { status: 200, headers });
 }
 
+async function handleListTags(env) {
+  const { results } = await env.DB.prepare(
+    `WITH RECURSIVE split(id, tag, rest) AS (
+       SELECT id, '', IFNULL(tags, '') || ',' FROM notes
+       UNION ALL
+       SELECT id,
+              TRIM(SUBSTR(rest, 1, INSTR(rest, ',') - 1)),
+              SUBSTR(rest, INSTR(rest, ',') + 1)
+         FROM split
+        WHERE rest != ''
+     ), distinct_tags AS (
+       SELECT DISTINCT id, tag FROM split WHERE tag != ''
+     )
+     SELECT tag, COUNT(*) as count
+       FROM distinct_tags
+      GROUP BY tag
+      ORDER BY count DESC, tag COLLATE NOCASE ASC`
+  ).all();
+
+  return jsonResponse({ items: results || [] }, 200, env);
+}
+
+async function handleDeleteTag(env, tag) {
+  const targetTag = typeof tag === "string" ? tag.trim() : "";
+  if (!targetTag) {
+    return jsonResponse({ error: "tag_required" }, 400, env);
+  }
+
+  const { results } = await env.DB
+    .prepare("SELECT id, tags FROM notes WHERE (',' || tags || ',') LIKE ?")
+    .bind(`%,${targetTag},%`)
+    .all();
+
+  let updated = 0;
+
+  for (const row of results || []) {
+    const nextTags = tagsFromDb(row.tags).filter((item) => item !== targetTag);
+
+    await env.DB.prepare("UPDATE notes SET tags = ?, updated_at = ? WHERE id = ?")
+      .bind(tagsToDb(nextTags), new Date().toISOString(), row.id)
+      .run();
+
+    updated += 1;
+  }
+
+  return jsonResponse({ tag: targetTag, updated }, 200, env);
+}
+
 /* ---------------------------------------------------------------------- */
 /* ルーティング                                                            */
 /* ---------------------------------------------------------------------- */
@@ -457,6 +507,31 @@ export default {
       const key = decodeURIComponent(url.pathname.slice("/api/images/".length));
       try {
         return await handleGetImage(env, key);
+      } catch (err) {
+        return jsonResponse({ error: "internal_error" }, 500, env);
+      }
+    }
+
+    if (url.pathname === "/api/tags") {
+      if (request.method !== "GET") {
+        return jsonResponse({ error: "method_not_allowed" }, 405, env);
+      }
+      try {
+        return await handleListTags(env);
+      } catch (err) {
+        return jsonResponse({ error: "internal_error" }, 500, env);
+      }
+    }
+
+    if (url.pathname.startsWith("/api/tags/")) {
+      if (request.method !== "DELETE") {
+        return jsonResponse({ error: "method_not_allowed" }, 405, env);
+      }
+
+      const tag = decodeURIComponent(url.pathname.slice("/api/tags/".length));
+
+      try {
+        return await handleDeleteTag(env, tag);
       } catch (err) {
         return jsonResponse({ error: "internal_error" }, 500, env);
       }

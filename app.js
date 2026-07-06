@@ -33,6 +33,7 @@ function assertConfigIsSet() {
 const PAGE_SIZE = 20;
 const UNTITLED_TAG = "タイトル未設定";
 const DEFAULT_SORT = "pinned";
+const DEFAULT_PAGE = "home";
 const SORT_STORAGE_KEY = "notes:sort";
 const DRAFT_STORAGE_PREFIX = "notes:draft:";
 const DRAFT_SAVE_DELAY = 350;
@@ -43,11 +44,13 @@ const state = {
   total: 0,
   hasMore: false,
   selectedId: null,
+  currentPage: DEFAULT_PAGE,
   query: "",
   activeTag: null,
   sort: DEFAULT_SORT,
   theme: "light",
-  knownTags: new Set(), // タグチップ表示用。読み込んだ範囲から見えたタグを蓄積するだけの簡易実装
+  knownTags: new Set(),
+  tagStats: [],
 };
 
 let searchDebounceTimer = null;
@@ -61,6 +64,9 @@ const el = {
   view: document.getElementById("note-view"),
   viewStatus: document.getElementById("note-view-status"),
   themeToggle: document.getElementById("theme-toggle"),
+  menuHome: document.getElementById("menu-home"),
+  menuSearch: document.getElementById("menu-search"),
+  menuTags: document.getElementById("menu-tags"),
   newNoteButton: document.getElementById("new-note-button"),
   searchInput: document.getElementById("search-input"),
   sortSelect: document.getElementById("sort-select"),
@@ -74,6 +80,10 @@ function isCompactScreen() {
 
 function normalizeSortValue(value) {
   return ["pinned", "updated", "created", "title"].includes(value) ? value : DEFAULT_SORT;
+}
+
+function normalizePageValue(value) {
+  return ["home", "search", "tags"].includes(value) ? value : DEFAULT_PAGE;
 }
 
 function getStoredSort() {
@@ -338,6 +348,30 @@ async function removeEntry(id) {
   });
 }
 
+async function fetchTags() {
+  const url = new URL(CONFIG.indexUrl);
+  url.pathname = "/api/tags";
+  url.search = "";
+
+  const response = await fetch(url.toString());
+  if (!response.ok) {
+    throw new Error(`タグ一覧の取得に失敗しました (status: ${response.status})`);
+  }
+  return response.json();
+}
+
+async function removeTag(tag) {
+  const url = new URL(CONFIG.indexUrl);
+  url.pathname = `/api/tags/${encodeURIComponent(tag)}`;
+  url.search = "";
+
+  const response = await fetch(url.toString(), { method: "DELETE" });
+  if (!response.ok) {
+    throw new Error(`タグ削除に失敗しました (status: ${response.status})`);
+  }
+  return response.json();
+}
+
 /* ---- formatting helpers ---- */
 
 function formatDate(isoString) {
@@ -364,14 +398,9 @@ function textToTags(text) {
     .filter((t) => t.length > 0);
 }
 
-function mergeKnownTags(items) {
-  for (const item of items) {
-    if (Array.isArray(item.tags)) {
-      for (const tag of item.tags) {
-        state.knownTags.add(tag);
-      }
-    }
-  }
+function syncKnownTagsFromStats(tagStats) {
+  state.tagStats = Array.isArray(tagStats) ? tagStats : [];
+  state.knownTags = new Set(state.tagStats.map((item) => item.name));
 }
 
 /* ---- error diagnostics ---- */
@@ -510,9 +539,18 @@ function renderList() {
   updateLoadMoreVisibility();
 }
 
+function isSafeHttpUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch (err) {
+    return false;
+  }
+}
+
 function parseInlineMarkdown(text) {
   const fragment = document.createDocumentFragment();
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  const pattern = /(\[[^\]]+\]\(https?:\/\/[^\s)]+\)|https?:\/\/[^\s<]+|\*\*[^*]+\*\*|`[^`]+`)/g;
   let lastIndex = 0;
   let match;
 
@@ -522,7 +560,30 @@ function parseInlineMarkdown(text) {
     }
 
     const token = match[0];
-    if (token.startsWith("**")) {
+    if (token.startsWith("[")) {
+      const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+      if (linkMatch && isSafeHttpUrl(linkMatch[2])) {
+        const anchor = document.createElement("a");
+        anchor.href = linkMatch[2];
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.textContent = linkMatch[1];
+        fragment.appendChild(anchor);
+      } else {
+        fragment.appendChild(document.createTextNode(token));
+      }
+    } else if (token.startsWith("http://") || token.startsWith("https://")) {
+      if (isSafeHttpUrl(token)) {
+        const anchor = document.createElement("a");
+        anchor.href = token;
+        anchor.target = "_blank";
+        anchor.rel = "noopener noreferrer";
+        anchor.textContent = token;
+        fragment.appendChild(anchor);
+      } else {
+        fragment.appendChild(document.createTextNode(token));
+      }
+    } else if (token.startsWith("**")) {
       const strong = document.createElement("strong");
       strong.textContent = token.slice(2, -2);
       fragment.appendChild(strong);
@@ -713,6 +774,129 @@ function renderEntry(entry) {
   el.view.appendChild(title);
   el.view.appendChild(meta);
   el.view.appendChild(content);
+}
+
+function renderSearchPage() {
+  hideViewStatus();
+  el.view.replaceChildren();
+
+  const heading = document.createElement("h2");
+  heading.className = "note-view__title";
+  heading.textContent = "検索";
+
+  const lead = document.createElement("p");
+  lead.className = "tag-management__description";
+  lead.textContent = "検索ボックスにキーワードを入力すると、タイトルと本文を横断検索できます。";
+
+  const meta = document.createElement("p");
+  meta.className = "tag-management__description";
+  const query = state.query.trim();
+  meta.textContent = query
+    ? `現在の条件: 「${query}」 / ${state.total}件`
+    : `現在の条件: キーワードなし / ${state.total}件`;
+
+  el.view.appendChild(heading);
+  el.view.appendChild(lead);
+  el.view.appendChild(meta);
+}
+
+function renderTagManagementPage() {
+  hideViewStatus();
+  el.view.replaceChildren();
+
+  const heading = document.createElement("h2");
+  heading.className = "note-view__title";
+  heading.textContent = "タグ管理";
+
+  const description = document.createElement("p");
+  description.className = "tag-management__description";
+  description.textContent = "未使用タグは自動で一覧から消えます。必要なタグはここから手動削除できます。";
+
+  const refreshButton = document.createElement("button");
+  refreshButton.type = "button";
+  refreshButton.className = "note-view__action-button";
+  refreshButton.textContent = "最新状態に更新";
+  refreshButton.addEventListener("click", () => {
+    void refreshTagState({ rerenderTagPage: true });
+  });
+
+  const list = document.createElement("ul");
+  list.className = "tag-management__list";
+
+  if (state.tagStats.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "tag-management__description";
+    empty.textContent = "タグはまだありません。";
+
+    el.view.appendChild(heading);
+    el.view.appendChild(description);
+    el.view.appendChild(refreshButton);
+    el.view.appendChild(empty);
+    return;
+  }
+
+  for (const tagInfo of state.tagStats) {
+    const item = document.createElement("li");
+    item.className = "tag-management__item";
+
+    const label = document.createElement("span");
+    label.className = "tag-management__label";
+    label.textContent = `${tagInfo.name} (${tagInfo.count})`;
+
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.className = "note-view__action-button note-view__action-button--danger";
+    removeButton.textContent = "タグを削除";
+    removeButton.addEventListener("click", () => {
+      void handleTagRemove(tagInfo.name);
+    });
+
+    item.appendChild(label);
+    item.appendChild(removeButton);
+    list.appendChild(item);
+  }
+
+  el.view.appendChild(heading);
+  el.view.appendChild(description);
+  el.view.appendChild(refreshButton);
+  el.view.appendChild(list);
+}
+
+function renderMenu() {
+  const buttons = [el.menuHome, el.menuSearch, el.menuTags];
+  for (const button of buttons) {
+    if (!button) continue;
+    const page = normalizePageValue(button.dataset.page || DEFAULT_PAGE);
+    const isActive = page === state.currentPage;
+    button.classList.toggle("app-menu__button--active", isActive);
+    button.setAttribute("aria-pressed", isActive ? "true" : "false");
+  }
+}
+
+function setCurrentPage(page) {
+  state.currentPage = normalizePageValue(page);
+  renderMenu();
+
+  if (state.currentPage === "tags") {
+    renderTagManagementPage();
+    return;
+  }
+
+  if (state.currentPage === "search") {
+    renderSearchPage();
+    window.setTimeout(() => {
+      el.searchInput.focus();
+      el.searchInput.select();
+    }, 0);
+    return;
+  }
+
+  if (state.selectedId) {
+    void selectEntry(state.selectedId);
+    return;
+  }
+
+  showEmptySelectionOrFirst();
 }
 
 /* ---- rendering: フォーム(新規作成 / 編集) ---- */
@@ -949,8 +1133,7 @@ async function loadList({ reset }) {
     state.items = reset ? data.items : [...state.items, ...data.items];
     state.total = data.total;
     state.hasMore = data.hasMore;
-    mergeKnownTags(data.items);
-    renderTagFilter();
+    await refreshTagState({ rerenderTagPage: state.currentPage === "tags" });
     renderList();
     return true;
   } catch (err) {
@@ -965,6 +1148,41 @@ async function handleLoadMore() {
   await loadList({ reset: false });
 }
 
+async function refreshTagState({ rerenderTagPage = false } = {}) {
+  try {
+    const data = await fetchTags();
+    syncKnownTagsFromStats(data.items || []);
+    renderTagFilter();
+    if (rerenderTagPage && state.currentPage === "tags") {
+      renderTagManagementPage();
+    }
+  } catch (err) {
+    console.error("[notes] タグ一覧の同期に失敗しました:", err);
+  }
+}
+
+async function handleTagRemove(tag) {
+  const confirmed = window.confirm(`タグ「${tag}」を全メモから削除しますか？`);
+  if (!confirmed) return;
+
+  try {
+    await removeTag(tag);
+
+    if (state.activeTag === tag) {
+      state.activeTag = null;
+    }
+
+    await loadList({ reset: true });
+
+    if (state.currentPage === "tags") {
+      renderTagManagementPage();
+    }
+  } catch (err) {
+    console.error("[notes] タグ削除に失敗しました:", err);
+    showViewStatus("タグ削除に失敗しました。時間をおいて再度お試しください。", "error");
+  }
+}
+
 /* ---- interaction: 検索 / タグ絞り込み ---- */
 
 function handleSearchInput(event) {
@@ -973,11 +1191,17 @@ function handleSearchInput(event) {
   searchDebounceTimer = setTimeout(() => {
     state.query = value;
     showListStatus("読み込み中…");
-    loadList({ reset: true });
+    loadList({ reset: true }).then(() => {
+      if (state.currentPage === "search") {
+        renderSearchPage();
+      }
+    });
   }, 300);
 }
 
 function handleTagChipClick(tag) {
+  state.currentPage = "home";
+  renderMenu();
   state.activeTag = state.activeTag === tag ? null : tag;
   showListStatus("読み込み中…");
   loadList({ reset: true });
@@ -993,6 +1217,11 @@ function handleSortChange(event) {
 /* ---- interaction: 一覧選択 ---- */
 
 async function selectEntry(id) {
+  if (state.currentPage !== "home") {
+    state.currentPage = "home";
+    renderMenu();
+  }
+
   state.selectedId = id;
   renderList(); // 選択状態(強調表示)を反映するため再描画
 
@@ -1019,12 +1248,16 @@ function showEmptySelectionOrFirst() {
 /* ---- interaction: 新規作成 / 編集フォーム表示 ---- */
 
 function showCreateForm() {
+  state.currentPage = "home";
+  renderMenu();
   state.selectedId = null;
   renderList();
   renderForm(null);
 }
 
 function showEditForm(entry) {
+  state.currentPage = "home";
+  renderMenu();
   renderForm(entry);
 }
 
@@ -1111,6 +1344,14 @@ function handleGlobalShortcut(event) {
   const key = event.key.toLowerCase();
   const form = el.view.querySelector("form");
 
+  if (["1", "2", "3"].includes(key) && !isTextEntryElement(target)) {
+    event.preventDefault();
+    if (key === "1") setCurrentPage("home");
+    if (key === "2") setCurrentPage("search");
+    if (key === "3") setCurrentPage("tags");
+    return;
+  }
+
   if (key === "/" && !isTextEntryElement(target) && !form) {
     event.preventDefault();
     el.searchInput.focus();
@@ -1193,9 +1434,19 @@ async function toggleTheme() {
 async function init() {
   state.sort = getStoredSort();
   await loadThemeSetting();
+  renderMenu();
 
   el.themeToggle.addEventListener("click", () => {
     void toggleTheme();
+  });
+  el.menuHome.addEventListener("click", () => {
+    setCurrentPage("home");
+  });
+  el.menuSearch.addEventListener("click", () => {
+    setCurrentPage("search");
+  });
+  el.menuTags.addEventListener("click", () => {
+    setCurrentPage("tags");
   });
   el.newNoteButton.addEventListener("click", showCreateForm);
   el.searchInput.addEventListener("input", handleSearchInput);
@@ -1219,6 +1470,8 @@ async function init() {
     showViewStatus("メモを選択してください。");
     return;
   }
+
+  await refreshTagState();
 
   if (state.items.length === 0) {
     showViewStatus("メモがまだありません。「+ 新規」から作成できます。");
